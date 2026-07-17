@@ -1,0 +1,605 @@
+{
+  "_comment": "PSS Classification Config \u2014 edit this file to add/modify document types. No Python changes needed.",
+  "_version": "1.0",
+  "_client": "NYC Government Contract Submissions",
+  "classification": {
+    "prototype_min_confidence": 0.82,
+    "keyword_min_hits": 1,
+    "low_confidence_threshold": 0.65,
+    "prototype_min_pages_to_save": 2
+  },
+  "special_tags": {
+    "engineering_drawing": {
+      "_comment": "Pages that are scanned CAD/architectural/construction drawings. These are NOT ingested \u2014 stored separately.",
+      "triggers": {
+        "single_large_image": {
+          "min_pixel_area": 1500000,
+          "max_image_count": 2,
+          "max_draw_count": 20
+        },
+        "orientation": "landscape"
+      }
+    },
+    "contains_tables": {
+      "_comment": "Segments where at least one page has significant tabular data structures. min_draw_count was previously ignored by the code (hardcoded to 150) -- as of the pss_classifier.py fix this value is now actually read. Set to 200 (higher than the old hardcoded 150) to directly address the known 'contains_tables still firing incorrectly on some segments' issue -- text-heavy FMS forms with vector borders/boxes were crossing 150 without being true tables.",
+      "triggers": {
+        "min_draw_count": 200,
+        "OR_min_table_count": 1
+      }
+    }
+  },
+  "document_types": [
+    {
+      "id": "advice_of_award",
+      "label": "Advice of Award (AOA)",
+      "description": "Official FMS-generated notice confirming the award of a contract or task order.",
+      "category": "Award / Financial",
+      "anchor_phrases": [
+        "advice of award",
+        "financial management system",
+        "advice of award revision"
+      ],
+      "keywords": [
+        "award revision",
+        "fms id",
+        "contract number",
+        "amendment num",
+        "vendor addr"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "acord_insurance",
+      "label": "ACORD 25 / Certificate of Liability Insurance",
+      "description": "Standard ACORD form certifying liability insurance. City of New York must appear as additional insured.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "certificate of liability insurance",
+        "acord 25",
+        "acord",
+        "acord form"
+      ],
+      "keywords": [
+        "additional insured",
+        "policy number",
+        "naic",
+        "general liability",
+        "umbrella"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "workers_comp",
+      "label": "Workers Compensation Certificate",
+      "description": "Certificate proving workers compensation insurance coverage.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "workers compensation",
+        "workers comp",
+        "c-105",
+        "u-26.3"
+      ],
+      "keywords": [
+        "compensation",
+        "employer",
+        "injury",
+        "disability"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "nys_disability",
+      "label": "NYS Disability Law Coverage Certificate",
+      "description": "Certificate of compliance with New York State Disability Benefits Law.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "disability benefits law",
+        "nys disability",
+        "db-120"
+      ],
+      "keywords": [
+        "disability",
+        "new york state",
+        "coverage certificate"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "budget_detail",
+      "label": "Budget Detail / Spreadsheet",
+      "description": "Detailed breakdown of the contract financial budget. Often tabular.",
+      "category": "Award / Financial",
+      "anchor_phrases": [
+        "contract budget amendment template",
+        "budget detail",
+        "budget amendment",
+        "line item",
+        "total budget",
+        "budget information",
+        "contract budget amendment"
+      ],
+      "keywords": [
+        "amount",
+        "total",
+        "expenditure",
+        "allocation",
+        "fiscal"
+      ],
+      "visual_signals": {
+        "min_draw_count": 100
+      },
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "tabular"
+    },
+    {
+      "id": "contract_agreement",
+      "label": "Contract / Base Agreement",
+      "description": "The foundational contract agreement, including scope of work and terms.",
+      "category": "Contract / Agreement",
+      "anchor_phrases": [
+        "agreement between",
+        "scope of work",
+        "terms and conditions",
+        "contract is entered"
+      ],
+      "keywords": [
+        "agreement",
+        "contractor",
+        "services",
+        "shall",
+        "hereinafter",
+        "pursuant"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "contract_amendment",
+      "label": "Contract Amendment / Extension",
+      "description": "Document modifying terms or extending duration of the original contract.",
+      "category": "Contract / Agreement",
+      "anchor_phrases": [
+        "amendment no.",
+        "amendment number",
+        "contract amendment",
+        "this amendment",
+        "contract change and modification report",
+        "request for contract change",
+        "request of contract change",
+        "modification or amendment"
+      ],
+      "keywords": [
+        "amendment",
+        "extension",
+        "modified",
+        "revised term",
+        "effective date"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "change_order",
+      "label": "Change Order Request",
+      "description": "Formal request for a change in contract scope, cost, or schedule.",
+      "category": "Contract / Agreement",
+      "anchor_phrases": [
+        "change order no.",
+        "change order request",
+        "change order #",
+        "co no",
+        "co no.",
+        "change order details",
+        "this is a change order"
+      ],
+      "keywords": [
+        "change order",
+        "modification",
+        "scope change",
+        "cost adjustment",
+        "contract modification"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "rfa_package",
+      "label": "Request for Award (RFA) Package",
+      "description": "Comprehensive package submitted to request a contract award.",
+      "category": "Award / Financial",
+      "anchor_phrases": [
+        "request for award",
+        "rfa"
+      ],
+      "keywords": [
+        "solicitation",
+        "award",
+        "procurement",
+        "competitive"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "responsibility_determination",
+      "label": "Responsibility Determination (Vendor)",
+      "description": "Document verifying vendor responsibility, including DOI vendor name check.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "responsibility determination",
+        "vendor responsibility",
+        "vendor name check",
+        "vendex",
+        "passport questionnaire"
+      ],
+      "keywords": [
+        "passport",
+        "investigation",
+        "results",
+        "compliance",
+        "caution"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "conflict_of_interest",
+      "label": "Conflict of Interest Disclosure Form",
+      "description": "Form disclosing potential conflicts of interest. Must be signed and notarized by vendor.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "conflict of interest",
+        "compliance certification"
+      ],
+      "keywords": [
+        "notarized",
+        "certify",
+        "disclose",
+        "vendor signature"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "tax_affirmation",
+      "label": "Tax Affirmation Form",
+      "description": "Form affirming vendor tax compliance. Must be signed by vendor.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "tax affirmation",
+        "tax certification"
+      ],
+      "keywords": [
+        "tax",
+        "affirm",
+        "irs",
+        "federal",
+        "compliance"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "omb_approval",
+      "label": "OMB Capital Project Approval",
+      "description": "Office of Management and Budget approval letter for capital projects.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "office of management and budget",
+        "omb approval",
+        "capital project"
+      ],
+      "keywords": [
+        "approval",
+        "capital",
+        "scope",
+        "budget",
+        "director"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "tax_filing_990",
+      "label": "Tax Filing (IRS Form 990)",
+      "description": "IRS Form 990 and attached schedules for exempt organizations.",
+      "category": "Tax Filing (IRS 990)",
+      "anchor_phrases": [
+        "form 990",
+        "990 return",
+        "omb no. 1545",
+        "exempt from income tax",
+        "return of organization exempt from income tax"
+      ],
+      "keywords": [
+        "schedule a",
+        "schedule b",
+        "internal revenue",
+        "nonprofit",
+        "exempt"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "financial_statements",
+      "label": "Financial Statements (Audited)",
+      "description": "Audited consolidated financial statements with auditor's report.",
+      "category": "Financial Statements",
+      "anchor_phrases": [
+        "independent auditor",
+        "auditor's report",
+        "consolidated statement",
+        "statement of financial position",
+        "statement of functional expenses"
+      ],
+      "keywords": [
+        "audit",
+        "financial position",
+        "functional expenses",
+        "revenue",
+        "net assets"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "encumbrance_report",
+      "label": "Encumbrance Report / FMS Screen",
+      "description": "Report or system screen showing financial encumbrance status.",
+      "category": "Award / Financial",
+      "anchor_phrases": [
+        "encumbrance",
+        "oca number",
+        "oca list",
+        "fms screen",
+        "capital encumbrance justification"
+      ],
+      "keywords": [
+        "encumbrance",
+        "oca",
+        "fund",
+        "dept",
+        "appropriation"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "tabular"
+    },
+    {
+      "id": "partial_registration_memo",
+      "label": "Partial Registration Memo",
+      "description": "Memo justifying partial encumbrance when contract is not fully encumbered.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "partial registration",
+        "partial encumbrance",
+        "not fully encumbered",
+        "late registration memo",
+        "de-registration",
+        "deregistration",
+        "de-register",
+        "late registration"
+      ],
+      "keywords": [
+        "partial",
+        "registration",
+        "encumbrance",
+        "late",
+        "deregister"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "public_notice",
+      "label": "Public Notice / City Record Publication",
+      "description": "Official public announcement regarding procurement or contract award.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "city record",
+        "public notice",
+        "notice of public hearing",
+        "notice of solicitation"
+      ],
+      "keywords": [
+        "notice",
+        "publication",
+        "solicitation",
+        "procurement",
+        "city record"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "vendor_performance",
+      "label": "Vendor Performance Evaluation",
+      "description": "Record indicating vendor satisfactory evaluation on prior contract.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "performance evaluation",
+        "vendor evaluation",
+        "satisfactory"
+      ],
+      "keywords": [
+        "performance",
+        "evaluation",
+        "vendor",
+        "prior contract",
+        "rating"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "cost_justification_memo",
+      "label": "Cost Justification Memo",
+      "description": "Memo explaining reasons for significant cost changes from the base agreement.",
+      "category": "Contract / Agreement",
+      "anchor_phrases": [
+        "cost justification",
+        "justification for",
+        "cost change"
+      ],
+      "keywords": [
+        "justification",
+        "cost",
+        "increase",
+        "change",
+        "explanation"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "engineering_drawing",
+      "label": "Engineering Drawing / Construction Plan",
+      "description": "Scanned CAD architectural or construction drawing. Not ingested into text pipeline \u2014 stored separately for visual review.",
+      "category": "Engineering Drawing",
+      "anchor_phrases": [],
+      "keywords": [
+        "drawing no",
+        "revision",
+        "scale",
+        "sheet",
+        "dwg"
+      ],
+      "visual_signals": {
+        "is_engineering_drawing_page": true,
+        "_note": "Classified via page-level visual fingerprint: 1 large scanned image (>1.5M pixels), landscape, <20 vector drawings. Keyword matching is secondary."
+      },
+      "special_tags": [
+        "engineering_drawing"
+      ],
+      "prototype_pages": [],
+      "ingest_mode": "engineering_drawing"
+    },
+    {
+      "id": "schedule_b_mwbe",
+      "label": "Schedule B / M-WBE Paperwork",
+      "description": "M/WBE performance goals documentation and solicitation compliance paperwork.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "schedule b",
+        "mwbe",
+        "m/wbe",
+        "minority",
+        "women-owned"
+      ],
+      "keywords": [
+        "minority",
+        "women",
+        "business enterprise",
+        "utilization",
+        "goals"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "mocs_discretionary",
+      "label": "MOCS Discretionary Award Tracker / Schedule C",
+      "description": "Mayor's Office of Contract Services discretionary award tracking document.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "mocs",
+        "discretionary award",
+        "schedule c",
+        "mayor's office of contract services"
+      ],
+      "keywords": [
+        "discretionary",
+        "cleared",
+        "tracker",
+        "mocs",
+        "schedule c"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "char500_annual_filing",
+      "label": "CHAR500 Annual Filing (NYS AG)",
+      "description": "New York State Attorney General annual filing for charitable organizations.",
+      "category": "Compliance / Regulatory",
+      "anchor_phrases": [
+        "char500",
+        "annual filing fee",
+        "registration number",
+        "attorney general",
+        "charitable organization annual report",
+        "annual filing for charitable organizations"
+      ],
+      "keywords": [
+        "char",
+        "annual filing",
+        "attorney general",
+        "charitable",
+        "nonprofit"
+      ],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    },
+    {
+      "id": "supporting_misc",
+      "label": "Supporting / Miscellaneous",
+      "description": "Catch-all for documents that do not match any specific known type.",
+      "category": "Supporting / Misc",
+      "anchor_phrases": [],
+      "keywords": [],
+      "visual_signals": {},
+      "special_tags": [],
+      "prototype_pages": [],
+      "ingest_mode": "standard"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+output_pdf1209_v1
+output_pdf1209_v2
+.venv
+.claude
+__pycache__
+instructions.md
