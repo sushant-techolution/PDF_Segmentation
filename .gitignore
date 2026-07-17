@@ -4,3 +4,4 @@ output_pdf1209_v2
 .claude
 __pycache__
 instructions.md
+service-account.json
