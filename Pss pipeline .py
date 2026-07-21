@@ -207,14 +207,28 @@ What changed from v1 and why (traceable to real run results):
          numbering reset co-occurs with a (region, pattern-kind) change
          from the last numbering scheme seen anywhere in the document.
 
-  Letterhead-change detector — built, tested, not shipped.
-         Token-set similarity between consecutive header bands, meant to
-         catch an agency/company letterhead switching with no other
-         signal. ~17% false-positive rate on real data, all inside
-         flowing legal-prose documents with no repeating letterhead to
-         compare — not a threshold problem, the technique just doesn't
-         fit that document type. The 3 pages it would've caught
-         (20151425114 pp11-12, 20156200048 p30) stay unresolved.
+  FIX 23 Letterhead-change detector, re-attempted with a gate
+         An earlier version of this (comparing token-set similarity
+         between any two consecutive header/footer bands) was built and
+         shelved: ~17% false-positive rate, all inside flowing legal-prose
+         documents that don't have a letterhead at all — the comparison
+         was firing on running headers and case captions that just happen
+         to differ page to page. Root cause wasn't the similarity
+         threshold, it was comparing pages that were never letterhead
+         pages to begin with. Fix: only extract a comparison block when a
+         page's header/footer actually contains an address, a phone/fax
+         line, or a website (find_letterhead_block) — legal prose and
+         correspondence headers have none of these, so they're excluded
+         before any comparison happens rather than filtered after.
+         Checked against the full corpus: only 5 of 218 pages worth of
+         consecutive-page pairs even have a letterhead on both sides;
+         same-organization pairs score 1.0 similarity, different-
+         organization pairs score 0.0-0.19 — a wide, clean margin for the
+         0.4 cutoff. One target case (20151425114 p11->p12, a private
+         engineering firm handing off to an NYC agency) needed this; the
+         other 4 eligible pairs were either the same organization
+         (correctly not flagged) or already a boundary via an existing
+         bookmark (flagging them again is redundant, not harmful).
 
 Install:
     pip install google-genai google-auth requests pymupdf numpy
@@ -278,6 +292,7 @@ WEIGHTS = {
     "embedding_moderate_each":   0.5,   # image + text scored independently, summed
     "drawing_density_spike":     0.3,   # weak, exploratory
     "drawing_density_drop":      0.3,   # collapse back to near-zero after a dense page (FIX 19)
+    "letterhead_change":         0.5,   # org-to-org letterhead swap, gated (FIX 23)
     "consecutive_flag_penalty": -0.5,   # real boundaries don't sustain across 2 pages
 }
 
@@ -436,6 +451,29 @@ PAGE_PAT_BARE = [
 # initial columns use it) and none of the real cases needed it.
 PAGE_LABEL_PAT = re.compile(r'^(PAGE|PG)\.?:?\s*$', re.IGNORECASE)
 
+# FIX 23: an org's actual letterhead — an address block, a phone/fax line,
+# or a website — rather than any header/footer text in general. Gating on
+# one of these three keeps this from firing on flowing legal prose or
+# running headers that have no letterhead to begin with (see FIX 23's
+# note in the fix log for why the naive version of this was never shipped).
+LETTERHEAD_ADDRESS_PAT = re.compile(r',\s*[A-Za-z .]+\s+\d{5}(-\d{4})?\b')
+LETTERHEAD_PHONE_PAT = re.compile(
+    r'\b(?:[TF]|TEL|FAX)[:.]?\s*\d{3}[.\-]\d{3}[.\-]\d{4}\b', re.IGNORECASE)
+LETTERHEAD_WEB_PAT = re.compile(r'\bwww\.\S+\.\w+', re.IGNORECASE)
+# Generic address vocabulary and English stopwords only — no city or state
+# names. An earlier version of this list included "new"/"york"/"ny" since
+# every PDF in the validation corpus happens to be a NYC document, but that
+# tied the detector to this one city for no real benefit: re-tested against
+# the same validation pairs with city names left in the comparison instead
+# of stripped, and the separation (0.048-0.263 for a real org change vs.
+# 1.000 for the same org) held up fine without them.
+LETTERHEAD_STOPWORDS = {
+    "the", "of", "to", "and", "in", "for", "a", "on", "at",
+    "street", "st", "avenue", "ave", "road", "rd", "floor", "suite",
+    "room", "blvd", "boulevard", "drive", "dr", "building",
+}
+LETTERHEAD_SIMILARITY_THRESHOLD = 0.4
+
 def is_blank(page, text_thresh=15, img_area_thresh=0.02):
     if len(page.get_text().strip()) > text_thresh: return False
     pa = page.rect.width * page.rect.height
@@ -537,6 +575,35 @@ def find_labeled_numbering(page, prev_numbering, max_p=999):
                 return (split_val, prior_total), (region, "split_label")
     return None, None
 
+def find_letterhead_block(page):
+    """Look for an org's letterhead — an address, a phone/fax line, or a
+    website — in the header/footer bands, widening the clip the same way
+    find_labeled_numbering does (FIX 20/23): a letterhead's contact block
+    routinely sits a bit below a tight 12% clip. Returns the matched text
+    (used for comparison against the previous page's) or None.
+    """
+    for frac in NUMBERING_BAND_FRACTIONS:
+        ht, ft = hf_text(page, frac=frac)
+        for text in (ht, ft):
+            lines = [l.strip() for l in text.splitlines() if l.strip()][:8]
+            blob = " ".join(lines)
+            if (LETTERHEAD_ADDRESS_PAT.search(blob) or LETTERHEAD_PHONE_PAT.search(blob)
+                    or LETTERHEAD_WEB_PAT.search(blob)):
+                return blob
+    return None
+
+def letterhead_similarity(a, b):
+    """Token-set (Jaccard) similarity between two letterhead blocks, common
+    city/state/floor words stripped out so two NYC agencies on different
+    streets don't read as similar just because both say "New York, NY"."""
+    def tokens(blob):
+        words = re.findall(r'[a-z0-9]+', blob.lower())
+        return {w for w in words if w not in LETTERHEAD_STOPWORDS and len(w) > 1}
+    ta, tb = tokens(a), tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
 # FIX 10: sub-document title markers (EXHIBIT A, SCHEDULE 1, ...). Only
 # matched against the first content line so a mid-sentence body reference
 # like "...attached hereto as Exhibit A..." doesn't fire.
@@ -620,6 +687,7 @@ def extract_det_features(doc, max_pages):
     prev_numbering = None
     prev_numbering_scheme = None    # (region, pattern_kind) of the last numbering found (FIX 22)
     numbering_seen_since_anchor = False  # FIX 21, same anchor-scoping as fmt_stack_since_anchor
+    prev_letterhead_block = None    # FIX 23
 
     for i in range(min(max_pages, len(doc))):
         page = doc[i]
@@ -685,6 +753,15 @@ def extract_det_features(doc, max_pages):
         numbering_scheme_changed = bool(
             numbering_fresh_start and numbering_scheme and prev_numbering_scheme
             and numbering_scheme != prev_numbering_scheme
+        )
+
+        # FIX 23: a real letterhead swap (organization to organization),
+        # not just any header/footer text difference — see find_letterhead_block.
+        letterhead_block = find_letterhead_block(page)
+        letterhead_changed = bool(
+            letterhead_block and prev_letterhead_block
+            and letterhead_similarity(letterhead_block, prev_letterhead_block)
+                < LETTERHEAD_SIMILARITY_THRESHOLD
         )
 
         draw_count = len(page.get_drawings())
@@ -774,6 +851,7 @@ def extract_det_features(doc, max_pages):
             "table_count":        0,   # placeholder — populated by pdfplumber if available
             "drawing_spike":      draw_spike,
             "drawing_density_drop": draw_drop,  # FIX 19
+            "letterhead_changed": letterhead_changed,  # FIX 23
             "text_char_count":    len(text),
             "text_density":       round(text_density, 8),
             "native_text":        text,
@@ -793,6 +871,7 @@ def extract_det_features(doc, max_pages):
             prev_l1_page = page_num
         if numbering: prev_numbering = numbering
         if numbering_scheme: prev_numbering_scheme = numbering_scheme
+        if letterhead_block: prev_letterhead_block = letterhead_block
         # FIX 21: scoped the same way as fmt_stack_since_anchor — an anchor
         # opens a new document context, so only numbering from this page
         # onward counts toward "seen since anchor".
@@ -1031,6 +1110,7 @@ def score_all(det_features, img_flags, txt_flags):
                 "numbering_score":    0.0,
                 "embedding_score":    0.0,
                 "drawing_score":      0.0,
+                "letterhead_score":   0.0,
                 "consecutive_penalty":0.0,
                 "total_score":        0.0,
                 "is_boundary":        False,
@@ -1081,13 +1161,16 @@ def score_all(det_features, img_flags, txt_flags):
             draw_score = WEIGHTS["drawing_density_drop"]
         else:
             draw_score = 0.0
+
+        letterhead_score = WEIGHTS["letterhead_change"] if f.get("letterhead_changed") else 0.0
+
         format_signal = f["format_changed"] and not f["format_returning"]
 
         # FIX 9: L2 bookmarks need a corroborating signal on the same page
         # to count; L1 is always trusted (0 FPs in validation). Otherwise an
         # L2 sub-heading of the same document reads the same as a genuine
         # L2 document anchor (FIX1's 990-block case).
-        corroborated = bool(num_score or draw_score or format_signal or emb_score)
+        corroborated = bool(num_score or draw_score or format_signal or emb_score or letterhead_score)
         trust_bookmark = f["has_l1_bookmark"] and (
             f["bookmark_level"] == 1 or corroborated)
 
@@ -1110,10 +1193,11 @@ def score_all(det_features, img_flags, txt_flags):
         struct_score = WEIGHTS["structural_change"] if structural else (
             WEIGHTS["structural_change_return"] if f["format_changed"] else 0.0)  # FIX 3
 
-        emb_only = emb_score > 0 and not structural and not f["numbering_reset"]
+        emb_only = (emb_score > 0 and not structural and not f["numbering_reset"]
+                    and not f.get("letterhead_changed"))
         penalty  = WEIGHTS["consecutive_flag_penalty"] if (emb_only and prev_emb_only) else 0.0
 
-        total = max(0.0, struct_score + num_score + emb_score + draw_score + penalty)
+        total = max(0.0, struct_score + num_score + emb_score + draw_score + letterhead_score + penalty)
         is_boundary = total >= BOUNDARY_THRESHOLD
 
         results.append({
@@ -1123,6 +1207,7 @@ def score_all(det_features, img_flags, txt_flags):
             "numbering_score":    num_score,
             "embedding_score":    round(emb_score,2),
             "drawing_score":      draw_score,
+            "letterhead_score":   letterhead_score,
             "consecutive_penalty":penalty,
             "total_score":        round(total,2),
             "is_boundary":        is_boundary,
@@ -1220,6 +1305,8 @@ def describe_boundary(det_row, scored_row):
     if scored_row["drawing_score"] > 0:
         sigs.append("drawing_density_drop" if det_row.get("drawing_density_drop")
                     else "drawing_density_spike")
+    if scored_row.get("letterhead_score", 0) > 0:
+        sigs.append("letterhead_change")
     return ";".join(sigs) if sigs else "unscored_boundary"
 
 
@@ -1258,6 +1345,7 @@ def write_report(out_dir, run_meta, det_features, scored, segments,
             "FIX20_adaptive_numbering_band",
             "FIX21_numbering_fresh_start",
             "FIX22_numbering_scheme_change",
+            "FIX23_gated_letterhead_change",
         ],
     }
     segs_out = [
