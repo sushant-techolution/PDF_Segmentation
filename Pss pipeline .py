@@ -87,6 +87,87 @@ What changed from v1 and why (traceable to real run results):
          JSON had no category column at all. Added a `category` field per
          type in pss_taxonomy.json and wired it through to output.
 
+  FIX 13 Same-title bookmark suppression fired on non-adjacent repeats
+         [20156200048 p12, 20176000030 p9]
+         Root cause: the suppression only compared a title against the
+         most recent trusted bookmark, no matter how many pages back that
+         was. A generic reused title ("ADVICE OF AWARD") ended up killing
+         a genuinely different document several pages later. Fix: only
+         suppress when the repeat is within ADJACENT_BOOKMARK_GAP pages
+         and nothing else on the page corroborates it (numbering reset,
+         drawing spike). A strong embedding drop later in scoring can
+         still reinstate a suppressed bookmark.
+
+  FIX 14 Duplicate/leftover pages created false document splits
+         [20080035308 pp7-8: byte-identical page, different bookmark title]
+         Nothing compared page content, only metadata, so a duplicate page
+         with its own auto-generated bookmark label read as a new
+         document. Fix: compare each page's text against the one before
+         it; anything at or above DUPLICATE_TEXT_SIMILARITY is a duplicate
+         and never produces a boundary signal, regardless of what
+         bookmark/format/title-anchor it carries. Also covers
+         instructions.md's Rule 3 (consecutive identical pages merge;
+         draft/signed pairs aren't duplicates since they differ in
+         signature text).
+
+  FIX 15 Format-return downweight applied across unrelated, already-closed
+         documents [20151425114 p10: US Letter → A4 → US Letter, the
+         return wrongly downweighted because a different document had
+         already opened and closed in between]
+         The "returning within 5 pages" check had no idea a document
+         boundary happened inside that window. Fix: the lookback resets at
+         any structural anchor instead of a flat page count, so "returning"
+         is scoped to the current document, not a fixed window.
+         Trade-off: a bare, uncorroborated format change now counts as an
+         anchor too, which means a same-document format excursion with no
+         bookmark also loses its downweight — nothing at this stage can
+         tell the two apart without reading page content. Checked the
+         whole corpus: doesn't actually happen anywhere, left as is.
+
+  FIX 16 Page-number label and value split across two lines never matched
+         [6 pages across 5 PDFs, e.g. 20141428308 p4, 20161418736 p4:
+         "PAGE:" and "1" printed on separate lines]
+         PAGE_PAT_TOTAL only matches "page X of Y" on one line, and the
+         bare-digit fallback was picking up an unrelated "DEPT: 826" code
+         first. Fix: parse_numbering_split_label looks for a PAGE/PG label
+         immediately followed by a bare digit — reads the clipped
+         header/footer band, not full-page text, since PyMuPDF's default
+         reading order isn't reliable across these multi-column forms (one
+         page had the label and value 48 lines apart). One page
+         (20141428308 p4) still isn't caught — its value sits behind an
+         unrelated field even in a wider band — left unfixed rather than
+         special-cased for one page.
+
+  FIX 17 Numbering reset was invisible with no prior value to compare
+         against [same 6 pages as FIX 16]
+         num_reset only ran when both a current AND a prior numbering
+         value existed, so the first numbered page after an unnumbered
+         cover sheet never registered. Fix: a fresh count of 1 is always a
+         reset candidate on its own. Still weight 0.8 (FIX 1: "strong but
+         not 1.0 alone"), so it still needs another signal to flip a
+         boundary by itself.
+
+  FIX 18 No detector for memo/email correspondence headers
+         [7 pages across 5 PDFs: memos opening DATE:/TO:, Outlook forwards
+         opening From:/Sent:/To:/Subject:, standalone "Memorandum" titles]
+         Only EXHIBIT/SCHEDULE-style title anchors existed; nothing caught
+         the shape of a memo or email header. Fix: detect_correspondence_
+         header flags >=2 of {TO, FROM, DATE, RE, SUBJECT, CC, SENT} as
+         line-starts in the first 15 lines, or a standalone "Memorandum"
+         line — order-independent since real examples show the labels in
+         different orders. Checked against the full corpus: 27 pages
+         fire, 26 are real boundaries, and the one exception is already
+         killed by FIX 14's duplicate check.
+
+  Letterhead-change detector — built, tested, not shipped.
+         Token-set similarity between consecutive header bands, meant to
+         catch an agency/company letterhead switching with no other
+         signal. ~17% false-positive rate on real data, all inside
+         flowing legal-prose documents with no repeating letterhead to
+         compare — not a threshold problem, the technique just doesn't
+         fit that document type. The 3 pages it would've caught
+         (20151425114 pp11-12, 20156200048 p30) stay unresolved.
+
 Install:
     pip install google-genai google-auth requests pymupdf numpy
 
@@ -102,6 +183,7 @@ Usage:
 import argparse
 import base64
 import csv
+import difflib
 import json
 import re
 import sys
@@ -154,6 +236,17 @@ Z_THRESHOLD         = -2.0   # raised from -1.5 (FIX 4)
 Z_HIGH_THRESHOLD    = -4.0
 MIN_STD             = 0.02
 MIN_ABSOLUTE_DROP   = 0.07   # raised from 0.05 (FIX 4)
+
+# FIX 13: max page gap for a repeated bookmark title to still count as
+# "same doc, different paper size" instead of two unrelated documents.
+# FIX 2's own example (PDF-003) is a next-page repeat, so 1 covers it.
+ADJACENT_BOOKMARK_GAP = 1
+
+# FIX 14: similarity ratio above which two consecutive pages count as
+# duplicates. The one confirmed duplicate in the client corpus scores
+# 1.0000; the closest real near-miss (two docs sharing a template, ASR #8
+# vs #9) scores 0.52 — 0.95 leaves wide margin either way.
+DUPLICATE_TEXT_SIMILARITY = 0.95
 
 # ── Category taxonomy ────────────────────────────────────────────────
 # Keyword lists used for text-based classification
@@ -282,6 +375,12 @@ PAGE_PAT_BARE = [
     re.compile(r'^\s*(\d+)\s*$'),
 ]
 
+# FIX 16: matches a page-number label on its own line ("PAGE:" then "1"
+# on the next). Won't collide with a nearby "DEPT: 826" field since that's
+# not a page label. Left out bare "P" on purpose — too generic (checkbox/
+# initial columns use it) and none of the real cases needed it.
+PAGE_LABEL_PAT = re.compile(r'^(PAGE|PG)\.?:?\s*$', re.IGNORECASE)
+
 def is_blank(page, text_thresh=15, img_area_thresh=0.02):
     if len(page.get_text().strip()) > text_thresh: return False
     pa = page.rect.width * page.rect.height
@@ -339,6 +438,22 @@ def parse_numbering_bare(text, max_p=999):
             if m:
                 c = int(m.group(1))
                 if c <= max_p: return c
+
+def parse_numbering_split_label(text, max_p=999):
+    """Find a PAGE/PG label immediately followed by a bare digit on the
+    next line. Pass the clipped header/footer band (hf_text), not the
+    full page — PyMuPDF's reading order can put a label and its value
+    dozens of lines apart on a multi-column form even though they sit
+    right next to each other visually. A small clipped region is reliable.
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for i in range(len(lines) - 1):
+        if PAGE_LABEL_PAT.match(lines[i]):
+            m = re.match(r'^(\d+)$', lines[i+1])
+            if m:
+                c = int(m.group(1))
+                if c <= max_p:
+                    return c
     return None
 
 # FIX 10: sub-document title markers (EXHIBIT A, SCHEDULE 1, ...). Only
@@ -347,12 +462,42 @@ def parse_numbering_bare(text, max_p=999):
 TITLE_ANCHOR_PAT = re.compile(
     r'^(EXHIBIT|SCHEDULE|ATTACHMENT|APPENDIX|ANNEX|ADDENDUM)\b')
 
-def detect_title_anchor(page, max_lines=3):
-    text = page.get_text().strip()
+def detect_title_anchor(text, max_lines=3):
+    """text: already-extracted, stripped page text (avoids re-extracting)."""
     for line in [l.strip() for l in text.splitlines() if l.strip()][:max_lines]:
         if TITLE_ANCHOR_PAT.match(line) and line.isupper():
             return line[:80]
     return None
+
+# FIX 18: memo/email correspondence header (TO:/FROM:/DATE:/RE:/SUBJECT:/
+# CC:/SENT: labels, or a standalone "Memorandum" title). Order doesn't
+# matter — a memo opens with DATE:/TO:, an Outlook forward opens with a
+# name before From:/Sent:/To:/Subject: — so this just checks for >=2
+# distinct labels anywhere in the first max_lines.
+CORRESPONDENCE_LABEL_PAT = re.compile(
+    r'^(TO|FROM|DATE|RE|SUBJECT|CC|SENT)\s*:', re.IGNORECASE)
+MEMO_TITLE_PAT = re.compile(r'^MEMORANDUM\s*$', re.IGNORECASE)
+
+def detect_correspondence_header(text, max_lines=15):
+    """text: already-extracted, stripped page text. Returns the sorted
+    list of distinct labels found (truthy iff >=2), for diagnostics."""
+    lines = [l.strip() for l in text.splitlines() if l.strip()][:max_lines]
+    labels = set()
+    for line in lines:
+        m = CORRESPONDENCE_LABEL_PAT.match(line)
+        if m:
+            labels.add(m.group(1).upper())
+        elif MEMO_TITLE_PAT.match(line):
+            labels.add("MEMORANDUM")
+    return sorted(labels) if len(labels) >= 2 else None
+
+
+def text_similarity(a, b):
+    """Ratio in [0, 1]; 1.0 means identical. Used by FIX 14 to detect
+    duplicate/leftover pages by content rather than by metadata."""
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
 
 def get_bookmark_map(doc):
     """Returns {0-based-idx: (title, level)}.
@@ -388,57 +533,88 @@ def extract_det_features(doc, max_pages):
     bm_map = get_bookmark_map(doc)
     features = []
     prev_label = None
-    prev_fmt_stack = []   # last 5 format labels (for FIX 3)
-    prev_l1_title = None  # last L1 bookmark title (for FIX 2)
+    fmt_stack_since_anchor = []  # formats seen since the last anchor (FIX 15)
+    prev_l1_title = None  # last trusted bookmark title (FIX 2/13)
+    prev_l1_page  = None  # page_num of that bookmark (FIX 13 adjacency)
     prev_numbering = None
 
     for i in range(min(max_pages, len(doc))):
         page = doc[i]
+        page_num = i + 1
         blank = is_blank(page)
         fmt = page_fmt(page)
         bm_entry = bm_map.get(i)
         bm_title = bm_entry[0] if bm_entry else None
         bm_level = bm_entry[1] if bm_entry else None
 
-        # FIX 2: suppress if same title as previous boundary-level bookmark
-        # AND no format change (avoids splitting continuation pages that share
-        # the same document-level bookmark title as the page before)
-        same_title_suppressed = False
-        if bm_level is not None and bm_level <= 2 and bm_title == prev_l1_title:
-            same_title_suppressed = True
+        text = page.get_text().strip()
 
-        # FIX 1+2: trust L1 and L2 bookmarks as boundary signals.
-        # L3+ are sub-section page markers (e.g. individual 990 schedule pages)
-        # and produce false positives when treated as document boundaries.
-        # L2 is needed because PDF-003's 990 block anchor ('Federal') is L2.
-        has_boundary_bookmark = (bm_level is not None and bm_level <= 2
-                                  and not same_title_suppressed)
-
-        # FIX 3: format returning to a recent format (within 5 pages)
-        format_changed = prev_label is not None and fmt["label"] != prev_label
-        format_returning = format_changed and fmt["label"] in prev_fmt_stack
+        # FIX 14: content-based duplicate check, only against the page right
+        # before it. Requires real text on both sides so two blank pages
+        # don't count (that's the blank-merge rule's job, not this one).
+        prev_text = features[-1]["native_text"] if features else None
+        is_duplicate_of_prev = (
+            prev_text is not None
+            and len(text) > 15 and len(prev_text) > 15
+            and text_similarity(text, prev_text) >= DUPLICATE_TEXT_SIMILARITY
+        )
 
         ht, ft = hf_text(page)
         numbering = (parse_numbering_total(ft) or parse_numbering_total(ht))
+        if numbering is None:
+            # FIX 16: label-then-value on separate lines. Tried before the
+            # bare-digit fallback below since it's anchored to a real label.
+            split_val = parse_numbering_split_label(ft) or parse_numbering_split_label(ht)
+            if split_val is not None:
+                numbering = (split_val, prev_numbering[1] if prev_numbering else None)
         if numbering is None:
             bare = parse_numbering_bare(ft) or parse_numbering_bare(ht)
             if bare is not None and prev_numbering is not None and bare == prev_numbering[0]+1:
                 numbering = (bare, prev_numbering[1])
 
+        # FIX 17: a fresh count of 1 is always a reset, even with no prior
+        # numbering to compare against (e.g. right after an unnumbered
+        # cover sheet — previously there was nothing to diff it against).
         num_reset = False
-        if numbering and prev_numbering:
-            pc,pt = prev_numbering; cc,_ = numbering
-            if pt is not None and pc==pt and cc==1: num_reset = True
-            elif cc < pc or cc > pc+1: num_reset = True
+        if numbering:
+            cc, _ = numbering
+            if cc == 1:
+                num_reset = True
+            elif prev_numbering:
+                pc, _ = prev_numbering
+                if cc < pc or cc > pc + 1:
+                    num_reset = True
 
         draw_count = len(page.get_drawings())
         img_count  = len(page.get_images(full=True))
         prev_dc    = features[-1]["drawing_count"] if features else None
         draw_spike = (prev_dc and prev_dc>0 and draw_count>prev_dc*3 and draw_count>200)
 
-        # Collect per-image pixel dimensions for engineering drawing detection.
-        # Uses get_image_info() which returns pixel dimensions without triggering
-        # the bbox ValueError that affects some CAD PDF embedded image formats.
+        # FIX 13: only suppress a repeated bookmark title when it's adjacent
+        # to the previous one AND nothing else on the page corroborates a
+        # real event. Raw title/level are kept below even when suppressed,
+        # so score_all can still reinstate it on a strong embedding drop.
+        is_repeat_title = (bm_level is not None and bm_level <= 2
+                            and bm_title == prev_l1_title)
+        is_adjacent = (prev_l1_page is not None
+                       and page_num - prev_l1_page <= ADJACENT_BOOKMARK_GAP)
+        same_title_suppressed = (
+            is_repeat_title and is_adjacent and not num_reset and not draw_spike
+        )
+
+        # FIX 1+2: trust L1 and L2 bookmarks as boundary signals.
+        # L3+ are sub-section page markers (e.g. individual 990 schedule pages)
+        # and produce false positives when treated as document boundaries.
+        # L2 is needed because PDF-003's 990 block anchor ('Federal') is L2.
+        has_boundary_bookmark = (bm_level is not None and bm_level <= 2
+                                  and not same_title_suppressed
+                                  and not is_duplicate_of_prev)
+
+        # FIX 15: "returning" is scoped to the current still-open document,
+        # not a flat page count — see fmt_stack_since_anchor update below.
+        format_changed = prev_label is not None and fmt["label"] != prev_label
+        format_returning = format_changed and fmt["label"] in fmt_stack_since_anchor
+
         img_infos = []
         try:
             for info in page.get_image_info(xrefs=True):
@@ -450,12 +626,22 @@ def extract_det_features(doc, max_pages):
         except Exception:
             pass  # get_image_info unavailable in older pymupdf — img_infos stays []
 
-        text = page.get_text().strip()
         text_density = len(text) / max(page.rect.width * page.rect.height, 1)
-        title_anchor = detect_title_anchor(page)
+        title_anchor = detect_title_anchor(text)
+        correspondence_labels = detect_correspondence_header(text)  # FIX 18
+
+        # A duplicate page can never open a new document. A bare format
+        # change with no bookmark/title-anchor still counts as an anchor
+        # here (needed for FIX 15) — see that entry for the trade-off.
+        is_structural_anchor_here = (not is_duplicate_of_prev) and (
+            has_boundary_bookmark
+            or (format_changed and not format_returning)
+            or bool(title_anchor)
+            or bool(correspondence_labels)
+        )
 
         features.append({
-            "page_num":           i+1,
+            "page_num":           page_num,
             "is_blank":           blank,
             "title_anchor":       title_anchor,
             "w": fmt["w"], "h": fmt["h"],
@@ -463,10 +649,14 @@ def extract_det_features(doc, max_pages):
             "size_bucket":        fmt["bucket"],
             "format_label":       fmt["label"],
             "format_changed":     format_changed,
-            "format_returning":   format_returning,  # FIX 3
+            "format_returning":   format_returning,  # FIX 3/15
             "has_l1_bookmark":    has_boundary_bookmark,
             "bookmark_title":     bm_title if has_boundary_bookmark else None,
             "bookmark_level":     bm_level,
+            "bookmark_suppressed": bool(bm_level is not None and bm_level <= 2
+                                         and not has_boundary_bookmark
+                                         and not is_duplicate_of_prev),  # FIX 13
+            "raw_bookmark_title": bm_title,  # unsuppressed, for FIX 13's rescue path
             "numbering_reset":    num_reset,
             "page_num_found":     numbering[0] if numbering else None,
             "page_total_found":   numbering[1] if numbering else None,
@@ -478,12 +668,20 @@ def extract_det_features(doc, max_pages):
             "text_char_count":    len(text),
             "text_density":       round(text_density, 8),
             "native_text":        text,
+            "is_duplicate_of_prev": is_duplicate_of_prev,  # FIX 14
+            "correspondence_labels": correspondence_labels,  # FIX 18
         })
 
         prev_label = fmt["label"]
-        prev_fmt_stack = (prev_fmt_stack + [fmt["label"]])[-5:]
+        # FIX 15: reset at a structural anchor instead of sliding a fixed
+        # 5-page window — format is only "returning" within this document.
+        if is_structural_anchor_here:
+            fmt_stack_since_anchor = [fmt["label"]]
+        else:
+            fmt_stack_since_anchor = fmt_stack_since_anchor + [fmt["label"]]
         if has_boundary_bookmark:
             prev_l1_title = bm_title
+            prev_l1_page = page_num
         if numbering: prev_numbering = numbering
 
     return features
@@ -705,6 +903,34 @@ def score_all(det_features, img_flags, txt_flags):
     for f in det_features:
         pn = f["page_num"]
 
+        # FIX 14: a duplicate page is never a boundary, full stop. Short-
+        # circuit before scoring anything else, and don't let it count
+        # toward FIX 8's consecutive-embedding-only penalty either.
+        if f.get("is_duplicate_of_prev"):
+            results.append({
+                "page_num":           pn,
+                "is_blank":           f["is_blank"],
+                "structural_score":   0.0,
+                "numbering_score":    0.0,
+                "embedding_score":    0.0,
+                "drawing_score":      0.0,
+                "consecutive_penalty":0.0,
+                "total_score":        0.0,
+                "is_boundary":        False,
+                "image_similarity":   None,
+                "image_z_reason":     None,
+                "text_similarity":    None,
+                "text_z_reason":      None,
+                "bookmark_title":     None,
+                "bookmark_level":     f.get("bookmark_level"),
+                "bookmark_trusted":   False,
+                "title_anchor":       None,
+                "correspondence_labels": None,
+                "duplicate_of_prev":  True,
+            })
+            prev_emb_only = False
+            continue
+
         is_,ts_ = img_map.get(pn,(None,False,None,False)), txt_map.get(pn,(None,False,None,False))
         img_high, txt_high = is_[3], ts_[3]
         img_mod,  txt_mod  = is_[1], ts_[1]
@@ -734,10 +960,22 @@ def score_all(det_features, img_flags, txt_flags):
         trust_bookmark = f["has_l1_bookmark"] and (
             f["bookmark_level"] == 1 or corroborated)
 
+        # FIX 13: a bookmark suppressed at extraction time gets one more
+        # chance now that embeddings exist — a strong drop here means the
+        # content is genuinely different despite the matching title.
+        bookmark_title = f.get("bookmark_title")
+        if f.get("bookmark_suppressed") and (img_high or txt_high):
+            trust_bookmark = True
+            bookmark_title = f.get("raw_bookmark_title")
+
         # FIX 10: all-caps title line at top of page (EXHIBIT A, SCHEDULE 1)
         title_anchor_hit = bool(f.get("title_anchor"))
 
-        structural = trust_bookmark or format_signal or title_anchor_hit
+        # FIX 18: memo/email correspondence header, weighted like a title
+        # anchor (strong-alone) — see the docstring for corpus validation.
+        correspondence_hit = bool(f.get("correspondence_labels"))
+
+        structural = trust_bookmark or format_signal or title_anchor_hit or correspondence_hit
         struct_score = WEIGHTS["structural_change"] if structural else (
             WEIGHTS["structural_change_return"] if f["format_changed"] else 0.0)  # FIX 3
 
@@ -761,10 +999,12 @@ def score_all(det_features, img_flags, txt_flags):
             "image_z_reason":     is_[2],
             "text_similarity":    ts_[0],
             "text_z_reason":      ts_[2],
-            "bookmark_title":     f.get("bookmark_title"),
+            "bookmark_title":     bookmark_title,
             "bookmark_level":     f.get("bookmark_level"),
             "bookmark_trusted":   bool(trust_bookmark),
             "title_anchor":       f.get("title_anchor"),
+            "correspondence_labels": f.get("correspondence_labels"),
+            "duplicate_of_prev":  False,
         })
         prev_emb_only = emb_only
     return results
@@ -833,6 +1073,8 @@ def describe_boundary(det_row, scored_row):
                         f"{scored_row['bookmark_title']}")
         elif scored_row.get("title_anchor"):
             sigs.append(f"title_anchor:{scored_row['title_anchor']}")
+        elif scored_row.get("correspondence_labels"):
+            sigs.append(f"correspondence_header:{'+'.join(scored_row['correspondence_labels'])}")
         elif det_row.get("format_changed"):
             sigs.append(f"format_change:{det_row.get('format_label')}")
     if scored_row["numbering_score"] > 0:
