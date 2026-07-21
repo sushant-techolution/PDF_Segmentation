@@ -159,6 +159,54 @@ What changed from v1 and why (traceable to real run results):
          fire, 26 are real boundaries, and the one exception is already
          killed by FIX 14's duplicate check.
 
+  FIX 19 Drawing-density drop wasn't checked, only spikes
+         Root cause: a fillable-form cover page (vector-drawn field boxes,
+         drawing_count in the hundreds) immediately followed by a plain
+         machine-printed report (drawing_count 0) is exactly as strong a
+         template-change signal as the reverse, but drawing_spike only
+         fired going up. Fix: drawing_density_drop mirrors the same
+         3x/floor-200 thresholds in the other direction — the page
+         collapses to under a third of a >200-drawing predecessor.
+         Generalizes to any pair of adjacent pages where one is a drawn
+         form or scan and the other isn't.
+
+  FIX 20 Header/footer number search used a fixed 12%-height band
+         Root cause: a "PAGE:" label matched but its value on the next
+         line sat a few points past the clip line on one page's
+         particular vertical spacing, so the split-label pattern found
+         the label and silently missed the value. Fix:
+         find_labeled_numbering retries the keyword-anchored patterns
+         (page X of Y, PAGE:/value) in a widening band before giving up.
+         The unanchored bare-digit fallback stays on the original tight
+         band — without a keyword anchor, widening it would start
+         matching arbitrary numbers in body text.
+
+  FIX 21 A numbering reset to a document's own first page scored the
+         same as a mid-document renumber
+         Root cause: several PDFs correctly detected a numbering reset
+         on a page that opened a new, unbookmarked sub-document, but
+         0.8 alone never crosses the boundary threshold and nothing
+         else corroborated it. A reset that happens because a page is
+         the FIRST one to carry any numbering since the last structural
+         anchor is a materially different case than a reset midway
+         through an already-numbered run — the latter is exactly what
+         page_numbering_reset's 0.8 cap exists to stay cautious about,
+         since nothing established a sequence for a first sighting to
+         be "resetting" from. Fix: numbering_fresh_start tracks whether
+         any numbering has been seen since the last anchor (the same
+         anchor-scoping FIX 15 already uses for format returns) and
+         scores 0.9 instead of 0.8 for a first sighting.
+
+  FIX 22 No signal for a change in how page numbers are presented
+         Root cause: same cases as FIX 21 — an earlier page's numbering
+         sits in the footer as a combined "X of Y" phrase, the new
+         sub-document's sits in the header as a split label/value pair.
+         That's a physically different numbering scheme, independent of
+         the numeric value, and is itself evidence of a different source
+         template. Fix: page_numbering_scheme_bonus adds 0.2 when a
+         numbering reset co-occurs with a (region, pattern-kind) change
+         from the last numbering scheme seen anywhere in the document.
+
   Letterhead-change detector — built, tested, not shipped.
          Token-set similarity between consecutive header bands, meant to
          catch an agency/company letterhead switching with no other
@@ -221,13 +269,16 @@ ESTIMATED_IMAGE_TOKENS_PER_PAGE = 1290
 
 # Signal weights — grounded in validation results, see inline evidence
 WEIGHTS = {
-    "structural_change":        1.0,   # bookmarks (L1 only), size/orient changes: 0 FP observed
-    "structural_change_return": 0.4,   # format returning to a prior format within 5 pages (FIX 3)
-    "page_numbering_reset":     0.8,   # X/Y total gated: strong but not 1.0 alone
-    "embedding_high_z":         1.0,   # |z|>4.0: near-perfect precision, safe standalone
-    "embedding_moderate_each":  0.5,   # image + text scored independently, summed
-    "drawing_density_spike":    0.3,   # weak, exploratory
-    "consecutive_flag_penalty": -0.5,  # real boundaries don't sustain across 2 pages
+    "structural_change":         1.0,   # bookmarks (L1 only), size/orient changes: 0 FP observed
+    "structural_change_return":  0.4,   # format returning to a prior format within 5 pages (FIX 3)
+    "page_numbering_reset":      0.8,   # X/Y total gated: strong but not 1.0 alone
+    "page_numbering_fresh_start": 0.9,  # reset with no prior numbering since the last anchor (FIX 21)
+    "page_numbering_scheme_bonus": 0.2, # region/pattern change alongside a reset (FIX 22)
+    "embedding_high_z":          1.0,   # |z|>4.0: near-perfect precision, safe standalone
+    "embedding_moderate_each":   0.5,   # image + text scored independently, summed
+    "drawing_density_spike":     0.3,   # weak, exploratory
+    "drawing_density_drop":      0.3,   # collapse back to near-zero after a dense page (FIX 19)
+    "consecutive_flag_penalty": -0.5,   # real boundaries don't sustain across 2 pages
 }
 
 BOUNDARY_THRESHOLD  = 1.0
@@ -236,6 +287,10 @@ Z_THRESHOLD         = -2.0   # raised from -1.5 (FIX 4)
 Z_HIGH_THRESHOLD    = -4.0
 MIN_STD             = 0.02
 MIN_ABSOLUTE_DROP   = 0.07   # raised from 0.05 (FIX 4)
+
+# FIX 20: widen the header/footer number-label search if the tight band
+# comes up empty, instead of a single fixed clip height.
+NUMBERING_BAND_FRACTIONS = (0.12, 0.20, 0.30)
 
 # FIX 13: max page gap for a repeated bookmark title to still count as
 # "same doc, different paper size" instead of two unrelated documents.
@@ -456,6 +511,32 @@ def parse_numbering_split_label(text, max_p=999):
                     return c
     return None
 
+def find_labeled_numbering(page, prev_numbering, max_p=999):
+    """Look for an explicit page-number label (a "page X of Y" phrase, or
+    a PAGE/PG label followed by its value) in the header/footer bands,
+    widening the clip if the tightest one comes up empty (FIX 20). Only
+    the two keyword-anchored patterns get this treatment — the bare-digit
+    fallback in extract_det_features stays on the original tight band,
+    since without a keyword to anchor it a wider window starts matching
+    unrelated numbers in body text.
+
+    Returns (numbering, scheme) where numbering is (current, total_or_None)
+    and scheme is a (region, pattern_kind) tag used to detect a change in
+    how numbering is presented (FIX 22), or (None, None) if nothing hit.
+    """
+    for frac in NUMBERING_BAND_FRACTIONS:
+        ht, ft = hf_text(page, frac=frac)
+        for region, text in (("footer", ft), ("header", ht)):
+            total = parse_numbering_total(text, max_p=max_p)
+            if total:
+                return total, (region, "total")
+        for region, text in (("footer", ft), ("header", ht)):
+            split_val = parse_numbering_split_label(text, max_p=max_p)
+            if split_val is not None:
+                prior_total = prev_numbering[1] if prev_numbering else None
+                return (split_val, prior_total), (region, "split_label")
+    return None, None
+
 # FIX 10: sub-document title markers (EXHIBIT A, SCHEDULE 1, ...). Only
 # matched against the first content line so a mid-sentence body reference
 # like "...attached hereto as Exhibit A..." doesn't fire.
@@ -537,6 +618,8 @@ def extract_det_features(doc, max_pages):
     prev_l1_title = None  # last trusted bookmark title (FIX 2/13)
     prev_l1_page  = None  # page_num of that bookmark (FIX 13 adjacency)
     prev_numbering = None
+    prev_numbering_scheme = None    # (region, pattern_kind) of the last numbering found (FIX 22)
+    numbering_seen_since_anchor = False  # FIX 21, same anchor-scoping as fmt_stack_since_anchor
 
     for i in range(min(max_pages, len(doc))):
         page = doc[i]
@@ -559,15 +642,12 @@ def extract_det_features(doc, max_pages):
             and text_similarity(text, prev_text) >= DUPLICATE_TEXT_SIMILARITY
         )
 
-        ht, ft = hf_text(page)
-        numbering = (parse_numbering_total(ft) or parse_numbering_total(ht))
+        numbering, numbering_scheme = find_labeled_numbering(page, prev_numbering)
         if numbering is None:
-            # FIX 16: label-then-value on separate lines. Tried before the
-            # bare-digit fallback below since it's anchored to a real label.
-            split_val = parse_numbering_split_label(ft) or parse_numbering_split_label(ht)
-            if split_val is not None:
-                numbering = (split_val, prev_numbering[1] if prev_numbering else None)
-        if numbering is None:
+            # Bare digit, no label to anchor it to — only trusted as a
+            # continuation of an already-established count, and only on
+            # the original tight band (see find_labeled_numbering).
+            ht, ft = hf_text(page)
             bare = parse_numbering_bare(ft) or parse_numbering_bare(ht)
             if bare is not None and prev_numbering is not None and bare == prev_numbering[0]+1:
                 numbering = (bare, prev_numbering[1])
@@ -576,19 +656,45 @@ def extract_det_features(doc, max_pages):
         # numbering to compare against (e.g. right after an unnumbered
         # cover sheet — previously there was nothing to diff it against).
         num_reset = False
+        num_reset_to_one = False
         if numbering:
             cc, _ = numbering
             if cc == 1:
                 num_reset = True
+                num_reset_to_one = True
             elif prev_numbering:
                 pc, _ = prev_numbering
                 if cc < pc or cc > pc + 1:
                     num_reset = True
 
+        # FIX 21: a page declaring itself "1" with nothing since the last
+        # anchor having carried any numbering at all is close to unambiguous
+        # — there's no existing sequence for it to be a mid-document
+        # renumber of. A discontinuity reset (the elif branch above, e.g.
+        # a page reading "2" compared against a "4" left over from an
+        # already-closed document several pages back) doesn't get this
+        # boost: the missing "1" in between means the current document's
+        # own first page may simply never have carried a visible number,
+        # which reads identically to a genuine cross-document jump.
+        numbering_fresh_start = bool(num_reset_to_one and not numbering_seen_since_anchor)
+
+        # FIX 22: the numbering scheme itself (header vs footer, "X of Y"
+        # vs a split label/value pair) changing alongside a fresh start is
+        # independent evidence of a different source template. Scoped to
+        # fresh_start rather than any reset for the same reason as above.
+        numbering_scheme_changed = bool(
+            numbering_fresh_start and numbering_scheme and prev_numbering_scheme
+            and numbering_scheme != prev_numbering_scheme
+        )
+
         draw_count = len(page.get_drawings())
         img_count  = len(page.get_images(full=True))
         prev_dc    = features[-1]["drawing_count"] if features else None
-        draw_spike = (prev_dc and prev_dc>0 and draw_count>prev_dc*3 and draw_count>200)
+        draw_spike = bool(prev_dc and prev_dc>0 and draw_count>prev_dc*3 and draw_count>200)
+        # FIX 19: the mirror case — a page collapsing back to near-zero
+        # drawings right after a drawing-heavy one is just as strong a
+        # signal that the source template changed as the spike is.
+        draw_drop = bool(prev_dc and prev_dc>200 and draw_count<prev_dc/3)
 
         # FIX 13: only suppress a repeated bookmark title when it's adjacent
         # to the previous one AND nothing else on the page corroborates a
@@ -658,6 +764,8 @@ def extract_det_features(doc, max_pages):
                                          and not is_duplicate_of_prev),  # FIX 13
             "raw_bookmark_title": bm_title,  # unsuppressed, for FIX 13's rescue path
             "numbering_reset":    num_reset,
+            "numbering_fresh_start": numbering_fresh_start,  # FIX 21
+            "numbering_scheme_changed": numbering_scheme_changed,  # FIX 22
             "page_num_found":     numbering[0] if numbering else None,
             "page_total_found":   numbering[1] if numbering else None,
             "drawing_count":      draw_count,
@@ -665,6 +773,7 @@ def extract_det_features(doc, max_pages):
             "image_infos":        img_infos,
             "table_count":        0,   # placeholder — populated by pdfplumber if available
             "drawing_spike":      draw_spike,
+            "drawing_density_drop": draw_drop,  # FIX 19
             "text_char_count":    len(text),
             "text_density":       round(text_density, 8),
             "native_text":        text,
@@ -683,6 +792,14 @@ def extract_det_features(doc, max_pages):
             prev_l1_title = bm_title
             prev_l1_page = page_num
         if numbering: prev_numbering = numbering
+        if numbering_scheme: prev_numbering_scheme = numbering_scheme
+        # FIX 21: scoped the same way as fmt_stack_since_anchor — an anchor
+        # opens a new document context, so only numbering from this page
+        # onward counts toward "seen since anchor".
+        if is_structural_anchor_here:
+            numbering_seen_since_anchor = bool(numbering)
+        else:
+            numbering_seen_since_anchor = numbering_seen_since_anchor or bool(numbering)
 
     return features
 
@@ -948,8 +1065,22 @@ def score_all(det_features, img_flags, txt_flags):
             emb_score = (WEIGHTS["embedding_moderate_each"] * img_mod +
                          WEIGHTS["embedding_moderate_each"] * txt_mod)
 
-        num_score     = WEIGHTS["page_numbering_reset"] if f["numbering_reset"] else 0.0
-        draw_score    = WEIGHTS["drawing_density_spike"] if f["drawing_spike"] else 0.0
+        if f["numbering_fresh_start"]:
+            num_score = WEIGHTS["page_numbering_fresh_start"]
+        elif f["numbering_reset"]:
+            num_score = WEIGHTS["page_numbering_reset"]
+        else:
+            num_score = 0.0
+        if f["numbering_fresh_start"] and f.get("numbering_scheme_changed"):
+            num_score += WEIGHTS["page_numbering_scheme_bonus"]
+        num_score = round(num_score, 2)
+
+        if f["drawing_spike"]:
+            draw_score = WEIGHTS["drawing_density_spike"]
+        elif f.get("drawing_density_drop"):
+            draw_score = WEIGHTS["drawing_density_drop"]
+        else:
+            draw_score = 0.0
         format_signal = f["format_changed"] and not f["format_returning"]
 
         # FIX 9: L2 bookmarks need a corroborating signal on the same page
@@ -1078,12 +1209,17 @@ def describe_boundary(det_row, scored_row):
         elif det_row.get("format_changed"):
             sigs.append(f"format_change:{det_row.get('format_label')}")
     if scored_row["numbering_score"] > 0:
-        sigs.append("page_numbering_reset")
+        label = "page_numbering_fresh_start" if det_row.get("numbering_fresh_start") \
+            else "page_numbering_reset"
+        if det_row.get("numbering_scheme_changed"):
+            label += "+scheme_change"
+        sigs.append(label)
     if scored_row["embedding_score"] > 0:
         z = scored_row.get("image_z_reason") or scored_row.get("text_z_reason")
         sigs.append(f"embedding_drop({z})" if z else "embedding_drop")
     if scored_row["drawing_score"] > 0:
-        sigs.append("drawing_density_spike")
+        sigs.append("drawing_density_drop" if det_row.get("drawing_density_drop")
+                    else "drawing_density_spike")
     return ";".join(sigs) if sigs else "unscored_boundary"
 
 
@@ -1112,6 +1248,16 @@ def write_report(out_dir, run_meta, det_features, scored, segments,
             "FIX10_title_anchor_signal",
             "FIX11_page_size_relative_tolerance",
             "FIX12_document_category_schema",
+            "FIX13_adjacent_bookmark_title_suppression",
+            "FIX14_duplicate_page_detection",
+            "FIX15_format_return_anchor_scoping",
+            "FIX16_split_label_page_numbering",
+            "FIX17_numbering_reset_on_fresh_count",
+            "FIX18_correspondence_header_detection",
+            "FIX19_drawing_density_drop",
+            "FIX20_adaptive_numbering_band",
+            "FIX21_numbering_fresh_start",
+            "FIX22_numbering_scheme_change",
         ],
     }
     segs_out = [
