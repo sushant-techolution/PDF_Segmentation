@@ -1,9 +1,9 @@
 """
-PSS Pipeline v2 — Page Stream Segmentation & Classification
+PSS Pipeline v2 - Page Stream Segmentation & Classification
 =============================================================
 What changed from v1 and why (traceable to real run results):
 
-  FIX 1  Bookmark depth filter [CRITICAL — fixed 57/63 FPs]
+  FIX 1  Bookmark depth filter [CRITICAL, fixed 57/63 FPs]
          Root cause: the IRS 990 block in PDF-003 had L3 bookmarks on
          every single page (67-123), each firing struct=1.0 and creating
          a 1-page segment. Only L1 (top-level) TOC entries are treated
@@ -12,7 +12,7 @@ What changed from v1 and why (traceable to real run results):
 
   FIX 2  Consecutive same-title bookmark suppression
          Root cause: PDF-003 had two consecutive L1 entries both titled
-         "AGREEMENT" at p3 (US Letter) and p4 (A4) — same logical
+         "AGREEMENT" at p3 (US Letter) and p4 (A4), same logical
          document split across two paper sizes. A bookmark fires on both,
          causing an FP at p4. Fix: if an L1 bookmark title is identical
          to the immediately preceding L1 title AND the page-format
@@ -47,7 +47,7 @@ What changed from v1 and why (traceable to real run results):
          Vertex AI rate limits constrain this, but 8-16 workers is safe
          for the default quotas and gives ~4-6× real speedup.
          After all parallel calls complete, similarity computation runs
-         in correct page order as before — parallelism is only on the
+         in correct page order as before, parallelism is only on the
          embedding extraction phase, not the analysis phase.
 
   FIX 7  Token count split (image vs text) for gemini-embedding-2
@@ -71,7 +71,7 @@ What changed from v1 and why (traceable to real run results):
          embedding drop) on the same page; L1 stays trusted alone.
 
   FIX 10 Missed boundary at "EXHIBIT A" page [PDF-01 p16]
-         No existing signal caught this — same page format, no bookmark,
+         No existing signal caught this, same page format, no bookmark,
          no numbering reset. Added a check for an all-caps title line
          (EXHIBIT/SCHEDULE/ATTACHMENT/APPENDIX/ANNEX/ADDENDUM) at the very
          top of the page.
@@ -88,7 +88,7 @@ What changed from v1 and why (traceable to real run results):
          type in pss_taxonomy.json and wired it through to output.
 
   FIX 13 Same-title bookmark suppression fired on non-adjacent repeats
-         [20156200048 p12, 20176000030 p9]
+         [2 validation PDFs, repeat several pages later]
          Root cause: the suppression only compared a title against the
          most recent trusted bookmark, no matter how many pages back that
          was. A generic reused title ("ADVICE OF AWARD") ended up killing
@@ -99,7 +99,7 @@ What changed from v1 and why (traceable to real run results):
          still reinstate a suppressed bookmark.
 
   FIX 14 Duplicate/leftover pages created false document splits
-         [20080035308 pp7-8: byte-identical page, different bookmark title]
+         [byte-identical page carrying a different bookmark title]
          Nothing compared page content, only metadata, so a duplicate page
          with its own auto-generated bookmark label read as a new
          document. Fix: compare each page's text against the one before
@@ -111,7 +111,7 @@ What changed from v1 and why (traceable to real run results):
          signature text).
 
   FIX 15 Format-return downweight applied across unrelated, already-closed
-         documents [20151425114 p10: US Letter → A4 → US Letter, the
+         documents [US Letter → A4 → US Letter, the
          return wrongly downweighted because a different document had
          already opened and closed in between]
          The "returning within 5 pages" check had no idea a document
@@ -120,22 +120,22 @@ What changed from v1 and why (traceable to real run results):
          is scoped to the current document, not a fixed window.
          Trade-off: a bare, uncorroborated format change now counts as an
          anchor too, which means a same-document format excursion with no
-         bookmark also loses its downweight — nothing at this stage can
+         bookmark also loses its downweight, nothing at this stage can
          tell the two apart without reading page content. Checked the
          whole corpus: doesn't actually happen anywhere, left as is.
 
   FIX 16 Page-number label and value split across two lines never matched
-         [6 pages across 5 PDFs, e.g. 20141428308 p4, 20161418736 p4:
+         [6 pages across 5 validation PDFs:
          "PAGE:" and "1" printed on separate lines]
          PAGE_PAT_TOTAL only matches "page X of Y" on one line, and the
          bare-digit fallback was picking up an unrelated "DEPT: 826" code
          first. Fix: parse_numbering_split_label looks for a PAGE/PG label
-         immediately followed by a bare digit — reads the clipped
+         immediately followed by a bare digit, reads the clipped
          header/footer band, not full-page text, since PyMuPDF's default
          reading order isn't reliable across these multi-column forms (one
          page had the label and value 48 lines apart). One page
-         (20141428308 p4) still isn't caught — its value sits behind an
-         unrelated field even in a wider band — left unfixed rather than
+         still isn't caught, its value sits behind an
+         unrelated field even in a wider band, left unfixed rather than
          special-cased for one page.
 
   FIX 17 Numbering reset was invisible with no prior value to compare
@@ -154,7 +154,7 @@ What changed from v1 and why (traceable to real run results):
          the shape of a memo or email header. Fix: detect_correspondence_
          header flags >=2 of {TO, FROM, DATE, RE, SUBJECT, CC, SENT} as
          line-starts in the first 15 lines, or a standalone "Memorandum"
-         line — order-independent since real examples show the labels in
+         line, order-independent since real examples show the labels in
          different orders. Checked against the full corpus: 27 pages
          fire, 26 are real boundaries, and the one exception is already
          killed by FIX 14's duplicate check.
@@ -165,7 +165,7 @@ What changed from v1 and why (traceable to real run results):
          machine-printed report (drawing_count 0) is exactly as strong a
          template-change signal as the reverse, but drawing_spike only
          fired going up. Fix: drawing_density_drop mirrors the same
-         3x/floor-200 thresholds in the other direction — the page
+         3x/floor-200 thresholds in the other direction, the page
          collapses to under a third of a >200-drawing predecessor.
          Generalizes to any pair of adjacent pages where one is a drawn
          form or scan and the other isn't.
@@ -178,7 +178,7 @@ What changed from v1 and why (traceable to real run results):
          find_labeled_numbering retries the keyword-anchored patterns
          (page X of Y, PAGE:/value) in a widening band before giving up.
          The unanchored bare-digit fallback stays on the original tight
-         band — without a keyword anchor, widening it would start
+         band, without a keyword anchor, widening it would start
          matching arbitrary numbers in body text.
 
   FIX 21 A numbering reset to a document's own first page scored the
@@ -189,7 +189,7 @@ What changed from v1 and why (traceable to real run results):
          else corroborated it. A reset that happens because a page is
          the FIRST one to carry any numbering since the last structural
          anchor is a materially different case than a reset midway
-         through an already-numbered run — the latter is exactly what
+         through an already-numbered run. That second case is exactly what
          page_numbering_reset's 0.8 cap exists to stay cautious about,
          since nothing established a sequence for a first sighting to
          be "resetting" from. Fix: numbering_fresh_start tracks whether
@@ -198,7 +198,7 @@ What changed from v1 and why (traceable to real run results):
          scores 0.9 instead of 0.8 for a first sighting.
 
   FIX 22 No signal for a change in how page numbers are presented
-         Root cause: same cases as FIX 21 — an earlier page's numbering
+         Root cause: same cases as FIX 21, an earlier page's numbering
          sits in the footer as a combined "X of Y" phrase, the new
          sub-document's sits in the header as a split label/value pair.
          That's a physically different numbering scheme, independent of
@@ -211,24 +211,47 @@ What changed from v1 and why (traceable to real run results):
          An earlier version of this (comparing token-set similarity
          between any two consecutive header/footer bands) was built and
          shelved: ~17% false-positive rate, all inside flowing legal-prose
-         documents that don't have a letterhead at all — the comparison
+         documents that don't have a letterhead at all, the comparison
          was firing on running headers and case captions that just happen
          to differ page to page. Root cause wasn't the similarity
-         threshold, it was comparing pages that were never letterhead
+         threshold; it was comparing pages that were never letterhead
          pages to begin with. Fix: only extract a comparison block when a
          page's header/footer actually contains an address, a phone/fax
-         line, or a website (find_letterhead_block) — legal prose and
+         line, or a website (find_letterhead_block), legal prose and
          correspondence headers have none of these, so they're excluded
          before any comparison happens rather than filtered after.
          Checked against the full corpus: only 5 of 218 pages worth of
          consecutive-page pairs even have a letterhead on both sides;
          same-organization pairs score 1.0 similarity, different-
-         organization pairs score 0.0-0.19 — a wide, clean margin for the
-         0.4 cutoff. One target case (20151425114 p11->p12, a private
-         engineering firm handing off to an NYC agency) needed this; the
+         organization pairs score 0.0-0.19, a wide, clean margin for the
+         0.4 cutoff. One target case (a private engineering firm
+         handing off to a government agency) needed this; the
          other 4 eligible pairs were either the same organization
          (correctly not flagged) or already a boundary via an existing
          bookmark (flagging them again is redundant, not harmful).
+
+  FIX 24 Confidence based on evidence, not on which branch fired
+         Confidence was hardcoded per cascade branch (Pass 1 always said
+         HIGH, Pass 4 said MEDIUM at >=2 keyword hits) so it measured
+         nothing, and it rated only the type label while sitting next to
+         the page range. Against the 232 colour-coded segments in the
+         labelled validation set the tiers came out backwards: LOW was
+         95% correctly segmented, HIGH only 84.8%.
+         Now reports segmentation and classification confidence
+         separately and headlines the weaker. Segmentation confidence
+         uses the margin of total_score over BOUNDARY_THRESHOLD, scored
+         on the weaker of the segment's two edges, plus three checks
+         inside the segment that catch merges (which edges cannot see):
+         a near-miss page, an unreadable page, and a segment more than
+         2x this document's median length. Any of those forces LOW and
+         names the page.
+         Reporting only - WEIGHTS, score_all and build_segments are
+         untouched, so no boundary moves.
+         Validated against per-page data from two labelled PDFs: all 24
+         mis-segmented rows land in LOW, and HIGH and MEDIUM are both
+         100% correct. 97.6% recall across the full labelled set.
+         Full analysis, caveats, and the rules that were tried and
+         rejected: confidence_integrity.md
 
 Install:
     pip install google-genai google-auth requests pymupdf numpy
@@ -248,22 +271,22 @@ import csv
 import difflib
 import json
 import re
+import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import fitz
 import numpy as np
-import requests
 
 from google import genai
 from google.genai import types
 from google.oauth2 import service_account
 from google.auth.transport.requests import AuthorizedSession
 
-# Classification module — self-contained, config-driven
+# Classification module, self-contained, config-driven
 sys.path.insert(0, str(Path(__file__).parent))
 from pss_classifier import Classifier
 
@@ -281,7 +304,7 @@ PRICING = {
 
 ESTIMATED_IMAGE_TOKENS_PER_PAGE = 1290
 
-# Signal weights — grounded in validation results, see inline evidence
+# Signal weights, grounded in validation results, see inline evidence
 WEIGHTS = {
     "structural_change":         1.0,   # bookmarks (L1 only), size/orient changes: 0 FP observed
     "structural_change_return":  0.4,   # format returning to a prior format within 5 pages (FIX 3)
@@ -313,9 +336,9 @@ NUMBERING_BAND_FRACTIONS = (0.12, 0.20, 0.30)
 ADJACENT_BOOKMARK_GAP = 1
 
 # FIX 14: similarity ratio above which two consecutive pages count as
-# duplicates. The one confirmed duplicate in the client corpus scores
-# 1.0000; the closest real near-miss (two docs sharing a template, ASR #8
-# vs #9) scores 0.52 — 0.95 leaves wide margin either way.
+# duplicates. The one confirmed duplicate in the validation set
+# scores 1.0000; the closest real near-miss, two documents sharing a
+# template, scores 0.52 - 0.95 leaves wide margin either way.
 DUPLICATE_TEXT_SIMILARITY = 0.95
 
 # ── Category taxonomy ────────────────────────────────────────────────
@@ -409,7 +432,7 @@ class CostTracker:
             "total_cost_usd": round(total_cost, 6),
             "any_token_counts_estimated": any_est,
             "estimation_note": (
-                "Some token counts ESTIMATED — verify against GCP Billing."
+                "Some token counts ESTIMATED, verify against GCP Billing."
                 if any_est else "All token counts measured from API responses."
             ),
             "cost_by_method": by_method,
@@ -433,7 +456,7 @@ def build_image_session(credentials):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. STAGE 0 — DETERMINISTIC FEATURES
+# 4. STAGE 0 - DETERMINISTIC FEATURES
 # ═══════════════════════════════════════════════════════════════════
 
 PAGE_PAT_TOTAL = [
@@ -447,12 +470,12 @@ PAGE_PAT_BARE = [
 
 # FIX 16: matches a page-number label on its own line ("PAGE:" then "1"
 # on the next). Won't collide with a nearby "DEPT: 826" field since that's
-# not a page label. Left out bare "P" on purpose — too generic (checkbox/
+# not a page label. Left out bare "P" on purpose, too generic (checkbox/
 # initial columns use it) and none of the real cases needed it.
 PAGE_LABEL_PAT = re.compile(r'^(PAGE|PG)\.?:?\s*$', re.IGNORECASE)
 
-# FIX 23: an org's actual letterhead — an address block, a phone/fax line,
-# or a website — rather than any header/footer text in general. Gating on
+# FIX 23: an org's actual letterhead, an address block, a phone/fax line,
+# or a website, rather than any header/footer text in general. Gating on
 # one of these three keeps this from firing on flowing legal prose or
 # running headers that have no letterhead to begin with (see FIX 23's
 # note in the fix log for why the naive version of this was never shipped).
@@ -460,10 +483,10 @@ LETTERHEAD_ADDRESS_PAT = re.compile(r',\s*[A-Za-z .]+\s+\d{5}(-\d{4})?\b')
 LETTERHEAD_PHONE_PAT = re.compile(
     r'\b(?:[TF]|TEL|FAX)[:.]?\s*\d{3}[.\-]\d{3}[.\-]\d{4}\b', re.IGNORECASE)
 LETTERHEAD_WEB_PAT = re.compile(r'\bwww\.\S+\.\w+', re.IGNORECASE)
-# Generic address vocabulary and English stopwords only — no city or state
-# names. An earlier version of this list included "new"/"york"/"ny" since
-# every PDF in the validation corpus happens to be a NYC document, but that
-# tied the detector to this one city for no real benefit: re-tested against
+# Generic address vocabulary and English stopwords only, no city or state
+# names. An earlier version included the city and state the
+# validation set happens to come from, but that tied the detector to one
+# locality for no real benefit: re-tested against
 # the same validation pairs with city names left in the comparison instead
 # of stripped, and the separation (0.048-0.263 for a real org change vs.
 # 1.000 for the same org) held up fine without them.
@@ -484,7 +507,7 @@ def is_blank(page, text_thresh=15, img_area_thresh=0.02):
             if b: ia += b.width * b.height
         except Exception:
             # get_image_bbox raises ValueError("bad image name") on some
-            # embedded image formats — common in engineering drawing PDFs
+            # embedded image formats, common in engineering drawing PDFs
             # with unusual compression or inline images. Treat as non-zero
             # image area (i.e. page is NOT blank) to be safe.
             ia += pa * img_area_thresh + 1
@@ -494,7 +517,7 @@ def is_blank(page, text_thresh=15, img_area_thresh=0.02):
 def size_bucket(w, h):
     ls, ss = max(w,h), min(w,h)
     if ls > 1000: return "WIDE"
-    # FIX 11: relative tolerance instead of flat 8pt — rescanned signature
+    # FIX 11: relative tolerance instead of flat 8pt, rescanned signature
     # pages drift ~2-3% and were falling into OTHER. US_LETTER/A4 are ~6%
     # apart so 3% still keeps them distinct.
     def close(a, b, rel=0.03):
@@ -535,7 +558,7 @@ def parse_numbering_bare(text, max_p=999):
 def parse_numbering_split_label(text, max_p=999):
     """Find a PAGE/PG label immediately followed by a bare digit on the
     next line. Pass the clipped header/footer band (hf_text), not the
-    full page — PyMuPDF's reading order can put a label and its value
+    full page - PyMuPDF's reading order can put a label and its value
     dozens of lines apart on a multi-column form even though they sit
     right next to each other visually. A small clipped region is reliable.
     """
@@ -553,7 +576,7 @@ def find_labeled_numbering(page, prev_numbering, max_p=999):
     """Look for an explicit page-number label (a "page X of Y" phrase, or
     a PAGE/PG label followed by its value) in the header/footer bands,
     widening the clip if the tightest one comes up empty (FIX 20). Only
-    the two keyword-anchored patterns get this treatment — the bare-digit
+    the two keyword-anchored patterns get this treatment, the bare-digit
     fallback in extract_det_features stays on the original tight band,
     since without a keyword to anchor it a wider window starts matching
     unrelated numbers in body text.
@@ -576,8 +599,8 @@ def find_labeled_numbering(page, prev_numbering, max_p=999):
     return None, None
 
 def find_letterhead_block(page):
-    """Look for an org's letterhead — an address, a phone/fax line, or a
-    website — in the header/footer bands, widening the clip the same way
+    """Look for an org's letterhead, an address, a phone/fax line, or a
+    website, in the header/footer bands, widening the clip the same way
     find_labeled_numbering does (FIX 20/23): a letterhead's contact block
     routinely sits a bit below a tight 12% clip. Returns the matched text
     (used for comparison against the previous page's) or None.
@@ -594,8 +617,8 @@ def find_letterhead_block(page):
 
 def letterhead_similarity(a, b):
     """Token-set (Jaccard) similarity between two letterhead blocks, common
-    city/state/floor words stripped out so two NYC agencies on different
-    streets don't read as similar just because both say "New York, NY"."""
+    city/state/floor words stripped out so two agencies on different streets
+    don't read as similar just because they share a city and state line."""
     def tokens(blob):
         words = re.findall(r'[a-z0-9]+', blob.lower())
         return {w for w in words if w not in LETTERHEAD_STOPWORDS and len(w) > 1}
@@ -619,8 +642,8 @@ def detect_title_anchor(text, max_lines=3):
 
 # FIX 18: memo/email correspondence header (TO:/FROM:/DATE:/RE:/SUBJECT:/
 # CC:/SENT: labels, or a standalone "Memorandum" title). Order doesn't
-# matter — a memo opens with DATE:/TO:, an Outlook forward opens with a
-# name before From:/Sent:/To:/Subject: — so this just checks for >=2
+# matter, a memo opens with DATE:/TO:, an Outlook forward opens with a
+# name before From:/Sent:/To:/Subject:, so this just checks for >=2
 # distinct labels anywhere in the first max_lines.
 CORRESPONDENCE_LABEL_PAT = re.compile(
     r'^(TO|FROM|DATE|RE|SUBJECT|CC|SENT)\s*:', re.IGNORECASE)
@@ -652,7 +675,7 @@ def get_bookmark_map(doc):
 
     Two rules derived from real client PDF analysis:
 
-    Rule 1 — Highest level wins per page (not first-encountered).
+    Rule 1 - Highest level wins per page (not first-encountered).
     The original first-entry-wins approach was wrong: PDF-003's p66 had
     a L2 'Federal' entry AND multiple L3 entries all pointing to page 66.
     The L3 entry happened to appear first in the TOC stream, so it won,
@@ -660,7 +683,7 @@ def get_bookmark_map(doc):
     where multiple TOC entries exist, keep the one with the LOWEST level
     number (i.e. highest in the hierarchy).
 
-    Rule 2 — Trust L1 AND L2 as boundary signals.
+    Rule 2 - Trust L1 AND L2 as boundary signals.
     PDF-003's 990 block uses L2 'Federal' as its document-level anchor —
     there is no L1 entry for the 990 group. Restricting to L1-only missed
     this real boundary. Threshold: trust levels 1 and 2; L3+ are
@@ -712,7 +735,7 @@ def extract_det_features(doc, max_pages):
 
         numbering, numbering_scheme = find_labeled_numbering(page, prev_numbering)
         if numbering is None:
-            # Bare digit, no label to anchor it to — only trusted as a
+            # Bare digit, no label to anchor it to, only trusted as a
             # continuation of an already-established count, and only on
             # the original tight band (see find_labeled_numbering).
             ht, ft = hf_text(page)
@@ -722,7 +745,7 @@ def extract_det_features(doc, max_pages):
 
         # FIX 17: a fresh count of 1 is always a reset, even with no prior
         # numbering to compare against (e.g. right after an unnumbered
-        # cover sheet — previously there was nothing to diff it against).
+        # cover sheet, previously there was nothing to diff it against).
         num_reset = False
         num_reset_to_one = False
         if numbering:
@@ -737,7 +760,7 @@ def extract_det_features(doc, max_pages):
 
         # FIX 21: a page declaring itself "1" with nothing since the last
         # anchor having carried any numbering at all is close to unambiguous
-        # — there's no existing sequence for it to be a mid-document
+        #, there's no existing sequence for it to be a mid-document
         # renumber of. A discontinuity reset (the elif branch above, e.g.
         # a page reading "2" compared against a "4" left over from an
         # already-closed document several pages back) doesn't get this
@@ -756,7 +779,7 @@ def extract_det_features(doc, max_pages):
         )
 
         # FIX 23: a real letterhead swap (organization to organization),
-        # not just any header/footer text difference — see find_letterhead_block.
+        # not just any header/footer text difference, see find_letterhead_block.
         letterhead_block = find_letterhead_block(page)
         letterhead_changed = bool(
             letterhead_block and prev_letterhead_block
@@ -768,7 +791,7 @@ def extract_det_features(doc, max_pages):
         img_count  = len(page.get_images(full=True))
         prev_dc    = features[-1]["drawing_count"] if features else None
         draw_spike = bool(prev_dc and prev_dc>0 and draw_count>prev_dc*3 and draw_count>200)
-        # FIX 19: the mirror case — a page collapsing back to near-zero
+        # FIX 19: the mirror case, a page collapsing back to near-zero
         # drawings right after a drawing-heavy one is just as strong a
         # signal that the source template changed as the spike is.
         draw_drop = bool(prev_dc and prev_dc>200 and draw_count<prev_dc/3)
@@ -794,7 +817,7 @@ def extract_det_features(doc, max_pages):
                                   and not is_duplicate_of_prev)
 
         # FIX 15: "returning" is scoped to the current still-open document,
-        # not a flat page count — see fmt_stack_since_anchor update below.
+        # not a flat page count, see fmt_stack_since_anchor update below.
         format_changed = prev_label is not None and fmt["label"] != prev_label
         format_returning = format_changed and fmt["label"] in fmt_stack_since_anchor
 
@@ -807,7 +830,7 @@ def extract_det_features(doc, max_pages):
                     img_infos.append({"width": iw, "height": ih,
                                       "colorspace": info.get("colorspace", 0)})
         except Exception:
-            pass  # get_image_info unavailable in older pymupdf — img_infos stays []
+            pass  # get_image_info unavailable in older pymupdf, img_infos stays []
 
         text_density = len(text) / max(page.rect.width * page.rect.height, 1)
         title_anchor = detect_title_anchor(text)
@@ -815,7 +838,7 @@ def extract_det_features(doc, max_pages):
 
         # A duplicate page can never open a new document. A bare format
         # change with no bookmark/title-anchor still counts as an anchor
-        # here (needed for FIX 15) — see that entry for the trade-off.
+        # here (needed for FIX 15), see that entry for the trade-off.
         is_structural_anchor_here = (not is_duplicate_of_prev) and (
             has_boundary_bookmark
             or (format_changed and not format_returning)
@@ -848,7 +871,7 @@ def extract_det_features(doc, max_pages):
             "drawing_count":      draw_count,
             "image_count":        img_count,
             "image_infos":        img_infos,
-            "table_count":        0,   # placeholder — populated by pdfplumber if available
+            "table_count":        0,   # placeholder, populated by pdfplumber if available
             "drawing_spike":      draw_spike,
             "drawing_density_drop": draw_drop,  # FIX 19
             "letterhead_changed": letterhead_changed,  # FIX 23
@@ -861,7 +884,7 @@ def extract_det_features(doc, max_pages):
 
         prev_label = fmt["label"]
         # FIX 15: reset at a structural anchor instead of sliding a fixed
-        # 5-page window — format is only "returning" within this document.
+        # 5-page window, format is only "returning" within this document.
         if is_structural_anchor_here:
             fmt_stack_since_anchor = [fmt["label"]]
         else:
@@ -872,7 +895,7 @@ def extract_det_features(doc, max_pages):
         if numbering: prev_numbering = numbering
         if numbering_scheme: prev_numbering_scheme = numbering_scheme
         if letterhead_block: prev_letterhead_block = letterhead_block
-        # FIX 21: scoped the same way as fmt_stack_since_anchor — an anchor
+        # FIX 21: scoped the same way as fmt_stack_since_anchor, an anchor
         # opens a new document context, so only numbering from this page
         # onward counts toward "seen since anchor".
         if is_structural_anchor_here:
@@ -884,7 +907,7 @@ def extract_det_features(doc, max_pages):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 5. STAGE 1 — PARALLEL EMBEDDING (FIX 6)
+# 5. STAGE 1 - PARALLEL EMBEDDING (FIX 6)
 # ═══════════════════════════════════════════════════════════════════
 
 def render_png(page, dpi=150):
@@ -893,7 +916,7 @@ def render_png(page, dpi=150):
     return px.tobytes("png")
 
 def _embed_one_gemini2(client, text, image_bytes, model, page_num, cost_tracker, stats, stats_lock):
-    """Single page embedding call — runs inside a thread."""
+    """Single page embedding call, runs inside a thread."""
     try:
         part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
         contents = [text, part] if text else \
@@ -955,7 +978,7 @@ def _embed_one_fallback(img_session, text_client, image_bytes, text,
             resp.raise_for_status()
             image_emb = resp.json()["predictions"][0].get("imageEmbedding")
             break
-        except Exception as e:
+        except Exception:
             if attempt == 4: raise
             time.sleep(delay); delay *= 2
 
@@ -973,7 +996,7 @@ def _embed_one_fallback(img_session, text_client, image_bytes, text,
                 for acc in (lambda o: o.statistics.token_count,
                             lambda o: o.usage_metadata.total_token_count):
                     try: tok = int(acc(te)); break
-                    except: pass
+                    except (AttributeError, TypeError, ValueError): pass
                 text_tokens = tok or max(len(text)//4, 1)
                 break
             except Exception:
@@ -1051,7 +1074,7 @@ def embed_all_pages_parallel(doc, det_features, gemini2_client, img_session,
 def cosine_sim(a, b):
     a, b = np.array(a), np.array(b)
     if a.shape != b.shape:
-        # Dimension mismatch — happens when gemini-embedding-2 (3072-dim)
+        # Dimension mismatch, happens when gemini-embedding-2 (3072-dim)
         # and the fallback multimodalembedding@001 (1408-dim) are both
         # present in the same run. Cannot compute similarity across different
         # spaces; treat as no signal rather than crashing.
@@ -1175,7 +1198,7 @@ def score_all(det_features, img_flags, txt_flags):
             f["bookmark_level"] == 1 or corroborated)
 
         # FIX 13: a bookmark suppressed at extraction time gets one more
-        # chance now that embeddings exist — a strong drop here means the
+        # chance now that embeddings exist, a strong drop here means the
         # content is genuinely different despite the matching title.
         bookmark_title = f.get("bookmark_title")
         if f.get("bookmark_suppressed") and (img_high or txt_high):
@@ -1186,7 +1209,7 @@ def score_all(det_features, img_flags, txt_flags):
         title_anchor_hit = bool(f.get("title_anchor"))
 
         # FIX 18: memo/email correspondence header, weighted like a title
-        # anchor (strong-alone) — see the docstring for corpus validation.
+        # anchor (strong-alone), see the docstring for corpus validation.
         correspondence_hit = bool(f.get("correspondence_labels"))
 
         structural = trust_bookmark or format_signal or title_anchor_hit or correspondence_hit
@@ -1242,12 +1265,12 @@ def build_segments(det_features, scored):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 8. CLASSIFICATION — delegated to pss_classifier.py
+# 8. CLASSIFICATION, delegated to pss_classifier.py
 #    The Classifier is config-driven (pss_taxonomy.json) and
 #    self-learning (pss_prototypes.json). See pss_classifier.py.
 # ═══════════════════════════════════════════════════════════════════
 
-# Classifier is instantiated once in run() and passed down — not a module-level
+# Classifier is instantiated once in run() and passed down, not a module-level
 # global, so multiple parallel pipeline runs can use different configs.
 
 
@@ -1277,7 +1300,7 @@ def split_and_write(doc, segments, classifications, out_dir):
 
 def describe_boundary(det_row, scored_row):
     """Which signal(s) fired at a segment's start page. Schema item
-    'Boundary Signals Fired' — just formats fields we already computed."""
+    'Boundary Signals Fired', just formats fields we already computed."""
     if not scored_row:
         return "unscored_boundary"
     if scored_row["page_num"] == 1:
@@ -1310,8 +1333,161 @@ def describe_boundary(det_row, scored_row):
     return ";".join(sigs) if sigs else "unscored_boundary"
 
 
+# ── FIX 24: confidence thresholds ───────────────────────────────────
+#
+# Confidence used to be a constant per cascade branch (Pass 1 -> HIGH,
+# etc.), which measured nothing. It also rated only the type label while
+# sitting next to the page range, so a HIGH row could have completely
+# wrong boundaries. Against the 232 colour-coded segments the tiers came
+# out backwards: LOW was 95% correctly segmented, HIGH only 84.8%.
+#
+# We already compute total_score per page and then throw it away by
+# reducing it to is_boundary = total >= 1.0. The margin over that
+# threshold is the evidence strength. A segment needs both edges right,
+# so it scores on the weaker one.
+#
+# Thresholds come from WEIGHTS, not from fitting the sheet: 1.0 is one
+# trusted signal, so 1.8 means two independent signals agreed.
+CONF_HIGH_MARGIN   = 1.8
+CONF_MEDIUM_MARGIN = 1.2
+
+# Interior evidence, for merges. A page inside a segment scoring this
+# high without crossing the threshold means we saw a document change
+# there and rejected it.
+NEAR_MISS_FLOOR      = 0.5   # half the boundary threshold
+OVERSIZED_SEGMENT_X  = 2.0   # times this document's own median segment
+
+# A single-segment PDF this short is unremarkable. Longer than this and
+# finding no boundaries probably means the detectors saw nothing, rather
+# than the file genuinely being one document.
+SINGLE_SEGMENT_PLAUSIBLE_PAGES = 3
+
+
+def segmentation_confidence(seg, scored_by_page, total_pages,
+                             det_by_page=None, median_seg_pages=None):
+    """How confident we are that this segment's page range is right.
+
+    Says nothing about the type label. Returns (tier, margin, reason).
+
+    Looks at two things. The edges tell us whether a boundary that fired
+    should have, which covers over-segmentation and off-by-one splits.
+    But edges cannot see a merge: run two documents together and the
+    missed boundary sits in the middle while both edges stay strong. 11
+    of the 14 errors that edge margin alone rated MEDIUM or better were
+    merges, so we also check the pages inside:
+
+      near-miss   a page scored >= NEAR_MISS_FLOOR but under the
+                  threshold. We saw a document change and rejected it.
+      unreadable  a page had no extractable text and was not blank, so
+                  the detectors had nothing to work with. This is the
+                  scanned/OCR case, where a merge leaves no near-miss
+                  trace because every signal scores zero.
+    """
+    def edge_score(page_num, is_doc_edge):
+        # Page 1 and the final page are not inferred boundaries, the
+        # document's own extent fixes them, so they carry no risk.
+        if is_doc_edge:
+            return 2.0
+        row = scored_by_page.get(page_num)
+        return row["total_score"] if row else 0.0
+
+    starts_at_doc_edge = seg["start"] == 1
+    ends_at_doc_edge   = seg["end"] >= total_pages
+
+    start_s = edge_score(seg["start"], starts_at_doc_edge)
+    # The segment's end is fixed by the NEXT segment's start boundary.
+    end_s   = edge_score(seg["end"] + 1, ends_at_doc_edge)
+
+    # Degenerate case: this segment IS the whole document, so BOTH its
+    # edges are just the file's extent and neither was decided by the
+    # pipeline. Edge margin would read 2.0 and report HIGH, which is
+    # exactly backwards, finding no boundaries at all in a long PDF is
+    # the least certain outcome there is, not the most. Absence of
+    # evidence must lower confidence, never raise it.
+    if starts_at_doc_edge and ends_at_doc_edge:
+        if total_pages <= SINGLE_SEGMENT_PLAUSIBLE_PAGES:
+            return ("MEDIUM", 2.0,
+                    f"whole {total_pages}p document is one segment, short "
+                    f"enough to be plausible, but nothing corroborates it")
+        return ("LOW", 0.0,
+                f"no boundaries detected anywhere in {total_pages} pages; "
+                f"segmentation may have failed entirely")
+
+    margin = min(start_s, end_s)
+    weak_page = seg["start"] if start_s <= end_s else seg["end"] + 1
+    n_pages = seg["end"] - seg["start"] + 1
+
+    # ── interior evidence ──
+    risks, interior = [], range(seg["start"] + 1, seg["end"] + 1)
+
+    near_miss_pages = [p for p in interior
+                       if NEAR_MISS_FLOOR <= scored_by_page.get(p, {}).get(
+                           "total_score", 0.0) < BOUNDARY_THRESHOLD]
+    if near_miss_pages:
+        top = max(near_miss_pages,
+                  key=lambda p: scored_by_page[p]["total_score"])
+        risks.append(f"possible_missed_boundary@p{top}"
+                     f"(scored {scored_by_page[top]['total_score']:.2f}"
+                     f"/{BOUNDARY_THRESHOLD})")
+
+    if det_by_page:
+        unreadable = [p for p in interior
+                      if (d := det_by_page.get(p)) and not d.get("is_blank")
+                      and not (d.get("native_text") or "").strip()]
+        if unreadable:
+            risks.append(f"unreadable_pages={len(unreadable)}"
+                         f"(p{unreadable[0]}..p{unreadable[-1]})")
+
+    oversized = bool(median_seg_pages and
+                     n_pages >= OVERSIZED_SEGMENT_X * median_seg_pages)
+
+    # Interior risk and size both beat edge strength here, since both
+    # point at a merge and a merge's edges look fine by definition.
+    #
+    # Note there is no rule promoting a bare-threshold boundary back to
+    # MEDIUM just because it sits on a normally-reliable signal like an
+    # L1 bookmark. An earlier version had one and it hid 14 errors in
+    # MEDIUM. A signal being good in general does not make one
+    # bare-threshold firing of it good.
+    if risks:
+        tier, reason = "LOW", "; ".join(risks)
+    elif oversized:
+        tier = "LOW"
+        reason = (f"segment is {n_pages}p vs ~{median_seg_pages:g}p typical "
+                  f"for this document, possible merge")
+    elif margin >= CONF_HIGH_MARGIN:
+        tier = "HIGH"
+        reason = f"both boundaries strong (weakest {margin:.2f})"
+    elif margin >= CONF_MEDIUM_MARGIN:
+        tier = "MEDIUM"
+        reason = f"one boundary at {margin:.2f} (p{weak_page})"
+    else:
+        tier = "LOW"
+        reason = f"weak boundary evidence at p{weak_page} ({margin:.2f})"
+
+    return tier, round(margin, 2), reason
+
+
+CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+CONF_NAME = {0: "LOW", 1: "MEDIUM", 2: "HIGH"}
+
+
+def combined_confidence(seg_tier, cls_tier):
+    """A row is only as good as its weaker half.
+
+    A segment with a perfect type label but boundaries that merged two
+    documents is not a HIGH result. Both halves stay in the output
+    separately so you can see which one is weak.
+    """
+    return CONF_NAME[min(CONF_RANK.get(seg_tier, 0),
+                          CONF_RANK.get(cls_tier, 0))]
+
+
 def write_report(out_dir, run_meta, det_features, scored, segments,
                   classifications, cost_summary, timing, files):
+    # split_and_write() normally creates this first, but don't depend on
+    # another function's side effect to be callable.
+    out_dir.mkdir(parents=True, exist_ok=True)
     det_by_page    = {f["page_num"]: f for f in det_features}
     scored_by_page = {r["page_num"]: r for r in scored}
     pdf_filename = Path(run_meta["input_pdf"]).name
@@ -1346,27 +1522,52 @@ def write_report(out_dir, run_meta, det_features, scored, segments,
             "FIX21_numbering_fresh_start",
             "FIX22_numbering_scheme_change",
             "FIX23_gated_letterhead_change",
+            "FIX24_evidence_based_confidence",
         ],
+        "confidence_config": {
+            "high_margin":   CONF_HIGH_MARGIN,
+            "medium_margin": CONF_MEDIUM_MARGIN,
+        },
     }
-    segs_out = [
+    # FIX 24: rate the segment's page range and its type label separately,
+    # then report the weaker of the two as the headline `confidence`.
+    total_pages_n = run_meta["total_pages"]
+    # Segment size is only meaningful relative to this document's own
+    # typical segment - "8 pages" means nothing without knowing whether
+    # the rest of the PDF splits into 2-page or 40-page documents.
+    # Real median, not sorted[len//2] - that skews high on even-length
+    # lists ([2,2,10,10] gives 10, not 6). Since oversized triggers at 2x
+    # the median, an inflated baseline means it under-fires and misses
+    # the merges it is there to catch.
+    _sizes = sorted(s["end"] - s["start"] + 1 for s in segments)
+    median_seg_pages = statistics.median(_sizes) if _sizes else None
+    segs_out = []
+    for i,(s,c,f) in enumerate(zip(segments, classifications, files)):
+        seg_tier, seg_margin, seg_why = segmentation_confidence(
+            s, scored_by_page, total_pages_n,
+            det_by_page=det_by_page, median_seg_pages=median_seg_pages)
+        cls_tier = c.get("confidence", "LOW")
+        segs_out.append(
         {"segment_index": i+1,
          "pdf_id": pdf_id,
          "pdf_filename": pdf_filename,
-         "total_pages": run_meta["total_pages"],
+         "total_pages": total_pages_n,
          "start_page": s["start"], "end_page": s["end"],
          "page_count": s["end"]-s["start"]+1,
          "document_type_id":   c.get("type_id", "unknown"),
          "document_type_label":c.get("label", c.get("category", "Unknown")),
          "document_category":  c.get("category", "Supporting / Misc"),
          "classification_method": c.get("method", ""),
-         "confidence": c.get("confidence", "LOW"),
+         "confidence": combined_confidence(seg_tier, cls_tier),
+         "segmentation_confidence": seg_tier,
+         "classification_confidence": cls_tier,
+         "boundary_margin": seg_margin,
+         "confidence_basis": seg_why,
          "boundary_signals_fired": describe_boundary(
              det_by_page.get(s["start"]), scored_by_page.get(s["start"])),
          "special_tags": c.get("special_tags", []),
          "ingest_mode":  c.get("ingest_mode", "standard"),
-         "output_file": Path(f).name}
-        for i,(s,c,f) in enumerate(zip(segments, classifications, files))
-    ]
+         "output_file": Path(f).name})
     report = {
         "run_metadata": run_meta,
         "timing_seconds": timing,
@@ -1384,13 +1585,16 @@ def write_report(out_dir, run_meta, det_features, scored, segments,
         w.writerow(["pdf_id","pdf_filename","total_pages",
                     "seg","start_page","end_page","page_count",
                     "document_type_id","document_type_label","document_category",
-                    "confidence","classification_method","boundary_signals_fired",
+                    "confidence","segmentation_confidence","classification_confidence",
+                    "boundary_margin","classification_method","boundary_signals_fired",
                     "special_tags","ingest_mode","output_file"])
         for r in segs_out:
             w.writerow([r["pdf_id"],r["pdf_filename"],r["total_pages"],
                         r["segment_index"],r["start_page"],r["end_page"],r["page_count"],
                         r["document_type_id"],r["document_type_label"],r["document_category"],
-                        r["confidence"],r["classification_method"],r["boundary_signals_fired"],
+                        r["confidence"],r["segmentation_confidence"],
+                        r["classification_confidence"],r["boundary_margin"],
+                        r["classification_method"],r["boundary_signals_fired"],
                         "|".join(r.get("special_tags",[])),
                         r.get("ingest_mode","standard"),r["output_file"]])
     return jp, cp
@@ -1411,7 +1615,7 @@ def run(input_pdf, creds, project, location, out_dir,
     timing = {}
     t0_total = time.time()
 
-    print(f"\nPSS Pipeline v2 — {Path(input_pdf).name}")
+    print(f"\nPSS Pipeline v2: {Path(input_pdf).name}")
     print(f"Project: {project}  |  Workers: {max_workers}  |  DPI: {dpi}")
 
     print("Authenticating...")
@@ -1452,7 +1656,7 @@ def run(input_pdf, creds, project, location, out_dir,
     det = extract_det_features(doc, process)
     timing["stage0_seconds"] = round(time.time()-t0, 2)
     n_blank = sum(1 for f in det if f["is_blank"])
-    print(f"  Done ({timing['stage0_seconds']}s) — {n_blank} blank pages skipped from embedding")
+    print(f"  Done ({timing['stage0_seconds']}s) - {n_blank} blank pages skipped from embedding")
 
     # Stage 1 (parallel)
     t0 = time.time()
@@ -1498,7 +1702,7 @@ def run(input_pdf, creds, project, location, out_dir,
     run_meta = {
         "input_pdf": str(input_pdf),
         "pipeline_version": "v2",
-        "run_timestamp": datetime.utcnow().isoformat()+"Z",
+        "run_timestamp": datetime.now(timezone.utc).isoformat(),
         "total_pages": total, "pages_processed": process,
         "blank_pages_skipped": n_blank,
         "segments_found": len(segments),

@@ -1,5 +1,5 @@
 """
-PSS Classifier — Document Type Classification Module
+PSS Classifier - Document Type Classification Module
 ======================================================
 A standalone classification layer that works on top of the segmentation
 output from pss_pipeline.py. Completely decoupled from segmentation so
@@ -13,29 +13,29 @@ Design principles
    JSON entry. No Python changes required.
 
 2. Three-pass cascade (fast→reliable→fallback):
-   Pass 1 — Anchor phrase match (fastest, near-100% precision)
+   Pass 1: Anchor phrase match (fastest, near-100% precision)
              Unique phrases that identify a document type with certainty.
              One match is sufficient. Runs on already-extracted text.
-   Pass 2 — Engineering drawing detection (visual fingerprint, free)
+   Pass 2: Engineering drawing detection (visual fingerprint, free)
              Single large scanned image on a landscape page = CAD drawing.
              This is MORE reliable than embeddings for this type because
              the signal is structural, not semantic.
-   Pass 3 — Prototype similarity (embedding-based, requires prior runs)
+   Pass 3: Prototype similarity (embedding-based, requires prior runs)
              Cosine similarity between segment centroid and stored
              prototypes. Only runs when passes 1 and 2 produce no result.
-   Pass 4 — Keyword scoring (fallback, always available)
+   Pass 4: Keyword scoring (fallback, always available)
              Weighted keyword hit count across all candidates.
-   Pass 5 — Default ("Supporting / Misc" with LOW confidence)
+   Pass 5: Default ("Supporting / Misc" with LOW confidence)
 
 3. Self-learning prototypes. Every segment classified with HIGH confidence
    (via passes 1, 2, or 3) saves its embedding centroid as a prototype
    for that document type. Next run, Pass 3 uses these prototypes.
-   The prototype file grows automatically — no manual labeling required.
+   The prototype file grows automatically, no manual labeling required.
    New document types in the config start with empty prototypes and
    bootstrap from keyword/anchor matches on first encounters.
 
 4. Special tags are orthogonal to type. Engineering drawing and
-   contains_tables are additive properties — a segment can be an
+   contains_tables are additive properties, a segment can be an
    "Advice of Award" AND "contains_tables". Tags are computed
    independently of the type classification.
 
@@ -52,7 +52,6 @@ Usage (batch, at end of pipeline run)
 """
 
 import json
-import math
 import re
 from pathlib import Path
 from typing import Optional
@@ -100,8 +99,8 @@ def is_engineering_drawing_page(page_feature: dict) -> bool:
     Text documents:             0-2 small images OR logo-sized images
 
     Key discriminator: a SINGLE large scanned image covering most of a
-    landscape page. This is structurally unique — no other document type
-    in the NYC government contract taxonomy has this profile.
+    landscape page. This is structurally unique. No other document type
+    in the contract taxonomy has this profile.
     """
     if page_feature.get("orientation") != "landscape":
         return False
@@ -115,7 +114,7 @@ def is_engineering_drawing_page(page_feature: dict) -> bool:
     iw = img_infos[0].get("width", 0)
     ih = img_infos[0].get("height", 0)
     pixel_area = iw * ih
-    return pixel_area > 1_500_000  # ~1200x1250 minimum — real CAD scans are 2200x1700+
+    return pixel_area > 1_500_000  # ~1200x1250 minimum, real CAD scans are 2200x1700+
 
 
 def segment_has_engineering_drawings(det_features: list, start: int, end: int) -> bool:
@@ -142,7 +141,7 @@ def segment_has_tables(det_features: list, start: int, end: int,
     special_tags.contains_tables.triggers.min_draw_count by the caller
     (Classifier._compute_special_tags) so it can be tuned without a code
     change. Previously this was hardcoded to 150 and silently ignored
-    whatever value was in the taxonomy file — editing the config had no
+    whatever value was in the taxonomy file, editing the config had no
     effect. Default here stays 150 so behavior is unchanged for any
     caller that doesn't pass a config value explicitly.
     """
@@ -271,37 +270,56 @@ class Classifier:
         never lose to a body match purely because it's a shorter string.
 
         If no anchor phrase matches the bookmark title, this falls back to
-        the original longest-match-in-body-text behavior unchanged — so
+        the original longest-match-in-body-text behavior unchanged, so
         segments with generic or mislabeled bookmarks (e.g. a bookmark
         literally titled "AGREEMENT" on what is actually an Advice of
         Award) still get classified from body text exactly as before.
-        Verified against every bookmark title in the current ground-truth
-        set to confirm this doesn't change any other segment's outcome.
+        Checked against every bookmark title in the labelled validation set
+        to confirm this doesn't change any other segment's outcome.
+
+        FIX 24: no longer a flat "HIGH" for every anchor hit. Two things
+        we were already computing and throwing away:
+
+        1. Bookmark and body matches are not equal evidence. The logic
+           above already treats the bookmark as stronger (it wins on any
+           length), but both returned HIGH anyway.
+        2. _find_anchor_matches returns every match. If two document
+           types both match, that is real ambiguity and the confidence
+           should say so. We were dropping the competitor and still
+           claiming HIGH.
         """
-        bm_candidates = self._find_anchor_matches(bm_titles.lower()) if bm_titles.strip() else []
-        if bm_candidates:
-            bm_candidates.sort(key=lambda x: -x[0])
-            _, best_dt, matched_phrase = bm_candidates[0]
+        def _resolve(candidates, source):
+            candidates.sort(key=lambda x: -x[0])
+            _, best_dt, matched_phrase = candidates[0]
+            # Ambiguity: did a DIFFERENT document type also match?
+            rival = next((dt["id"] for _, dt, _ in candidates
+                          if dt["id"] != best_dt["id"]), None)
+            if source == "bookmark":
+                conf = "MEDIUM" if rival else "HIGH"
+            else:
+                # A body-text anchor is weaker evidence to begin with, so
+                # an unchallenged one is HIGH but a contested one drops
+                # two tiers rather than one.
+                conf = "LOW" if rival else "HIGH"
+            method = f"anchor_phrase_{source}:{matched_phrase[:40]}"
+            if rival:
+                method += f"|contested_by:{rival}"
             return {
                 "type_id": best_dt["id"],
                 "label": best_dt["label"],
-                "confidence": "HIGH",
-                "method": f"anchor_phrase_bookmark:{matched_phrase[:40]}",
+                "confidence": conf,
+                "method": method,
                 "ingest_mode": best_dt.get("ingest_mode", "standard"),
             }
+
+        bm_candidates = self._find_anchor_matches(bm_titles.lower()) if bm_titles.strip() else []
+        if bm_candidates:
+            return _resolve(bm_candidates, "bookmark")
 
         body_candidates = self._find_anchor_matches(body_text.lower())
         if not body_candidates:
             return None
-        body_candidates.sort(key=lambda x: -x[0])
-        _, best_dt, matched_phrase = body_candidates[0]
-        return {
-            "type_id": best_dt["id"],
-            "label": best_dt["label"],
-            "confidence": "HIGH",
-            "method": f"anchor_phrase_body:{matched_phrase[:40]}",
-            "ingest_mode": best_dt.get("ingest_mode", "standard"),
-        }
+        return _resolve(body_candidates, "body")
 
     # ── Pass 2: Engineering drawing visual fingerprint ───────────────
 
@@ -312,13 +330,21 @@ class Classifier:
         drawings (per visual fingerprint), classify as Engineering Drawing.
         Threshold at 0.6 so that a segment that STARTS with a cover page
         and then has drawings still gets classified correctly.
+
+        FIX 24: the fraction already tells us how good the match is, so
+        it now grades the confidence instead of everything over 0.60
+        reporting a flat HIGH. 100% drawing pages is a lot safer than
+        62%, where a third of the pages look like something else, and
+        that borderline is where merged ranges tend to show up.
         """
         frac = engineering_drawing_fraction(det_features, start, end)
         if frac >= 0.60:
+            confidence = ("HIGH" if frac >= 0.90 else
+                          "MEDIUM" if frac >= 0.75 else "LOW")
             return {
                 "type_id": "engineering_drawing",
                 "label": "Engineering Drawing / Construction Plan",
-                "confidence": "HIGH",
+                "confidence": confidence,
                 "method": f"visual_fingerprint:{frac:.0%}_drawing_pages",
                 "ingest_mode": "engineering_drawing",
             }
@@ -364,38 +390,67 @@ class Classifier:
     # ── Pass 4: Keyword scoring ──────────────────────────────────────
 
     def _pass4_keywords(self, combined_text: str) -> Optional[dict]:
+        """
+        FIX 24: the old rule was `MEDIUM if hits >= 2 else LOW`. Two
+        problems with a raw count.
+
+        It is not comparable across types. 2 hits against a type with 4
+        keywords is half its vocabulary; 2 hits against one with 30 is
+        noise. Both said MEDIUM. Dividing by the type's own keyword
+        count fixes that.
+
+        It also ignored the runner-up, which matters more. This pass
+        only runs when everything better has declined, so the gap to
+        second place is the real signal: 4 hits beating 3 is a coin
+        flip, 4 beating 0 is not. Old rule called both MEDIUM.
+        """
         text_lower = combined_text.lower()
-        scores = {}
+        scores, totals = {}, {}
         for dt in self.doc_types:
             if dt["id"] == "supporting_misc":
                 continue
-            hits = sum(1 for kw in dt.get("keywords", []) if kw.lower() in text_lower)
+            kws = dt.get("keywords", [])
+            hits = sum(1 for kw in kws if kw.lower() in text_lower)
             if hits >= self.kw_min_hits:
                 scores[dt["id"]] = hits
+                totals[dt["id"]] = max(1, len(kws))
 
         if not scores:
             return None
 
-        best_id = max(scores, key=scores.get)
+        ranked = sorted(scores, key=lambda k: -scores[k])
+        best_id = ranked[0]
+        best_hits = scores[best_id]
+        runner_up = scores[ranked[1]] if len(ranked) > 1 else 0
+        coverage = best_hits / totals[best_id]
+        margin = best_hits - runner_up
+
+        # Never HIGH: this pass only runs because every stronger method
+        # already declined, so its ceiling is capped at MEDIUM by design.
+        if margin >= 2 and coverage >= 0.25:
+            confidence = "MEDIUM"
+        else:
+            confidence = "LOW"
+
         dt = self.type_map[best_id]
-        confidence = "MEDIUM" if scores[best_id] >= 2 else "LOW"
         return {
             "type_id": best_id,
             "label": dt["label"],
             "confidence": confidence,
-            "method": f"keyword_score:{scores[best_id]}_hits",
+            "method": (f"keyword_score:{best_hits}_hits"
+                       f"|coverage={coverage:.2f}|margin={margin}"),
             "ingest_mode": dt.get("ingest_mode", "standard"),
         }
 
     # ── Special tag computation ──────────────────────────────────────
 
-    def _compute_special_tags(self, det_features: list, start: int, end: int,
-                                base_type_id: str) -> list:
+    def _compute_special_tags(self, det_features: list,
+                              start: int, end: int) -> list:
         tags = []
-        # Engineering drawing — structural visual fingerprint, very reliable
+        # Engineering drawing, structural visual fingerprint, very reliable
         if segment_has_engineering_drawings(det_features, start, end):
             tags.append("engineering_drawing")
-        # Tables — only from actual page-level detection (draw count or pdfplumber).
+        # Tables, only from actual page-level detection (draw count or pdfplumber).
         # Threshold now actually comes from taxonomy config (see segment_has_tables
         # docstring) instead of being silently hardcoded.
         table_min_draw = (self.tag_config.get("contains_tables", {})
@@ -436,14 +491,20 @@ class Classifier:
         # A segment opening on an EXHIBIT/SCHEDULE/ATTACHMENT title page is
         # an attachment by definition. Don't let 1-2 incidental keyword
         # hits (generic boilerplate like "agreement"/"shall") force it into
-        # an unrelated type — fall back to Supporting/Misc unless the
+        # an unrelated type, fall back to Supporting/Misc unless the
         # keyword match is actually strong (3+ hits).
         opens_with_title_anchor = bool(seg_feats and seg_feats[0].get("title_anchor"))
 
         def _guarded_pass4():
             r = self._pass4_keywords(combined_text)
             if r and opens_with_title_anchor:
-                hits = int(r["method"].split(":")[1].split("_")[0])
+                # FIX 24: parse the hit count by pattern rather than by
+                # positional string splitting, the method string now
+                # carries coverage/margin diagnostics after the count,
+                # and a positional split would silently break if that
+                # format changes again.
+                m = re.search(r"keyword_score:(\d+)_hits", r["method"])
+                hits = int(m.group(1)) if m else 0
                 if hits < 3:
                     return None
             return r
@@ -473,7 +534,7 @@ class Classifier:
 
         # Compute special tags (always, orthogonal to type)
         result["special_tags"] = self._compute_special_tags(
-            det_features, start, end, result["type_id"])
+            det_features, start, end)
 
         # Accumulate prototype if high confidence and enough non-blank pages,
         # OR if classified by anchor phrase (anchor = high precision regardless of length)
