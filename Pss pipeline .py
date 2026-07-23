@@ -731,7 +731,25 @@ def get_bookmark_map(doc):
             bm[idx] = (title, level)
     return bm
 
-def extract_det_features(doc, max_pages):
+# Below this many extractable characters, a non-blank page is treated as
+# a scanned image that needs OCR. Blank pages are excluded (nothing to
+# recover). Only used when OCR fallback is enabled.
+OCR_TEXT_TRIGGER_CHARS = 40
+
+
+def pages_needing_ocr(doc, max_pages):
+    """1-based page numbers that have almost no extractable text but are
+    not blank, i.e. scanned pages the detectors currently can't read."""
+    out = []
+    for i in range(min(max_pages, len(doc))):
+        page = doc[i]
+        if len(page.get_text().strip()) < OCR_TEXT_TRIGGER_CHARS and not is_blank(page):
+            out.append(i + 1)
+    return out
+
+
+def extract_det_features(doc, max_pages, ocr_text_override=None):
+    ocr_text_override = ocr_text_override or {}
     bm_map = get_bookmark_map(doc)
     features = []
     prev_label = None
@@ -752,7 +770,14 @@ def extract_det_features(doc, max_pages):
         bm_title = bm_entry[0] if bm_entry else None
         bm_level = bm_entry[1] if bm_entry else None
 
-        text = page.get_text().strip()
+        # OCR fallback: a scanned page recovers its text here. When no
+        # override exists (the normal case) this is exactly the old line,
+        # so behaviour is unchanged unless OCR actually ran. This feeds
+        # the text-based detectors (title anchor, correspondence, the
+        # duplicate check) directly.
+        ocr_text = ocr_text_override.get(page_num)
+        ocr_used = bool(ocr_text)
+        text = ocr_text if ocr_used else page.get_text().strip()
 
         # FIX 14: content-based duplicate check, only against the page right
         # before it. Requires real text on both sides so two blank pages
@@ -773,6 +798,26 @@ def extract_det_features(doc, max_pages):
             bare = parse_numbering_bare(ft) or parse_numbering_bare(ht)
             if bare is not None and prev_numbering is not None and bare == prev_numbering[0]+1:
                 numbering = (bare, prev_numbering[1])
+
+        # OCR fallback for numbering: find_labeled_numbering reads the page
+        # object directly (via hf_text clips), so it never sees OCR'd text.
+        # When OCR ran on this page and the normal path found nothing, look
+        # for the same keyword-anchored patterns in the OCR full-page text.
+        # Safe to search the whole page here (not just a band) because both
+        # patterns are keyword-anchored, the same reasoning FIX 20 used to
+        # widen the band. find_letterhead_block is deliberately left out:
+        # its whole design is a positional header/footer gate, which OCR
+        # plain text can't preserve without bounding boxes.
+        if numbering is None and ocr_used:
+            total = parse_numbering_total(text)
+            if total:
+                numbering, numbering_scheme = total, ("fulltext_ocr", "total")
+            else:
+                split_val = parse_numbering_split_label(text)
+                if split_val is not None:
+                    prior_total = prev_numbering[1] if prev_numbering else None
+                    numbering = (split_val, prior_total)
+                    numbering_scheme = ("fulltext_ocr", "split_label")
 
         # FIX 17: a fresh count of 1 is always a reset, even with no prior
         # numbering to compare against (e.g. right after an unnumbered
@@ -1742,7 +1787,8 @@ def run(input_pdf, creds, project, location, out_dir,
          gemini2_location="us",
          taxonomy_path="pss_taxonomy.json",
          prototypes_path="pss_prototypes.json",
-         accumulate_prototypes=False):
+         accumulate_prototypes=False,
+         use_ocr=False):
 
     timing = {}
     t0_total = time.time()
@@ -1782,10 +1828,29 @@ def run(input_pdf, creds, project, location, out_dir,
     process = total if max_pages is None else min(max_pages, total)
     print(f"Pages: {total} (processing {process})")
 
+    # Stage 0a: OCR fallback (optional). Only the scanned/textless pages
+    # are sent, so a clean PDF makes zero API calls. Runs before Stage 0
+    # so extract_det_features sees recovered text from page 1 onward.
+    ocr_override = {}
+    if use_ocr:
+        need = pages_needing_ocr(doc, process)
+        if need:
+            print(f"\nStage 0a: OCR fallback on {len(need)} textless page(s): {need}")
+            try:
+                from ocr import ocr_pages
+                ocr_override = ocr_pages(creds_obj, project, doc, need)
+                recovered = sum(1 for v in ocr_override.values() if v)
+                print(f"  recovered text on {recovered}/{len(need)} pages")
+            except Exception as e:
+                print(f"  OCR fallback failed ({e}); continuing without it")
+                ocr_override = {}
+        else:
+            print("\nStage 0a: OCR fallback enabled, but no textless pages found.")
+
     # Stage 0
     t0 = time.time()
     print("\nStage 0: deterministic features...")
-    det = extract_det_features(doc, process)
+    det = extract_det_features(doc, process, ocr_text_override=ocr_override)
     timing["stage0_seconds"] = round(time.time()-t0, 2)
     n_blank = sum(1 for f in det if f["is_blank"])
     print(f"  Done ({timing['stage0_seconds']}s) - {n_blank} blank pages skipped from embedding")
@@ -1884,10 +1949,15 @@ if __name__ == "__main__":
                          "OFF by default because auto-accumulation was found to learn from "
                          "wrong classifications. Only pass this once you've manually verified "
                          "a run's output and want to seed prototypes from it.")
+    ap.add_argument("--use-ocr", action="store_true",
+                    help="Enable the Document AI OCR fallback for scanned/textless "
+                         "pages. OFF by default. Only the pages with no extractable "
+                         "text are sent, so a clean PDF makes no OCR calls.")
     args = ap.parse_args()
     run(args.input_pdf, args.creds, args.project, args.location,
         args.output_dir, max_pages=args.limit, gemini2_model=args.gemini2_model,
         use_gemini2=not args.no_gemini2, dpi=args.dpi, max_workers=args.workers,
         gemini2_location=args.gemini2_location,
         taxonomy_path=args.taxonomy, prototypes_path=args.prototypes,
-        accumulate_prototypes=args.accumulate_prototypes)
+        accumulate_prototypes=args.accumulate_prototypes,
+        use_ocr=args.use_ocr)

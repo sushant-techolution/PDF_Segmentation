@@ -24,6 +24,7 @@ python3 "Pss pipeline .py" "20151425114_1016185945_20241212.PDF" \
   --output-dir ./output/20151425114_1016185945_20241212_v1 --workers 5 \
   --taxonomy pss_taxonomy.json --prototypes pss_prototypes.json
 
-<!-- python "Pss pipeline .py" "synthetic_test_file_01.PDF" --creds service-account.json --project proposal-auto-ai-internal --location us-central1 --gemini2-location us --output-dir ./output_pdf01_v1 --workers 5 --taxonomy pss_taxonomy.json --prototypes pss_prototypes.json -->
+<!-- python "Pss pipeline .py" "20171403887_1016186898_20241218.PDF" --creds service-account.json --project proposal-auto-ai-internal --location us-central1 --gemini2-location us --output-dir ./output_pdf1218_v1 --workers 5 --taxonomy pss_taxonomy.json --prototypes pss_prototypes.json -->
 
 python3 run_batch.py --project proposal-auto-ai-internal --workers 5
+python3 compare_to_ground_truth.py  ground_truth.xlsx  script_output.xlsx  -o result.xlsx

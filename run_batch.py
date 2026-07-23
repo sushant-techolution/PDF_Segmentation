@@ -88,6 +88,10 @@ def main():
     ap.add_argument("--taxonomy", default="pss_taxonomy.json")
     ap.add_argument("--prototypes", default="pss_prototypes.json")
     ap.add_argument("--accumulate-prototypes", action="store_true")
+    ap.add_argument("--use-ocr", action="store_true",
+                     help="enable the Document AI OCR fallback for scanned/textless pages "
+                          "(forwarded to each pipeline run). Off by default; only pages with no "
+                          "extractable text are sent, so clean PDFs make no OCR calls")
     ap.add_argument("--limit", type=int, default=None, help="page limit per PDF (forwarded as --limit)")
     ap.add_argument("--skip-existing", action="store_true",
                      help="skip a PDF if it already has a COMPLETED run (a <stem>_v*/run_report.json "
@@ -170,6 +174,8 @@ def main():
                 cmd += ["--no-gemini2"]
             if args.accumulate_prototypes:
                 cmd += ["--accumulate-prototypes"]
+            if args.use_ocr:
+                cmd += ["--use-ocr"]
 
             t0 = time.time()
             try:

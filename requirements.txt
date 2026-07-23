@@ -6,3 +6,4 @@ pymupdf>=1.24,<2.0
 # Google AI
 google-genai>=0.7,<2.0
 google-auth>=2.34,<3.0
+google-cloud-documentai
