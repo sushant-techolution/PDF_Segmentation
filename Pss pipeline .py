@@ -253,6 +253,37 @@ What changed from v1 and why (traceable to real run results):
          Full analysis, caveats, and the rules that were tried and
          rejected: confidence_integrity.md
 
+  FIX 25 Segment cohesion signal (embedding, no new API cost)
+         The commonest miss is the next document's opening page being
+         swallowed by the end of the previous segment. It has no format
+         change (the cover shares the prior orientation), no bookmark,
+         and an embedding drop too small to register against the whole
+         PDF, so nothing fires. But inside its own segment it stands out:
+         the other pages sit at 0.94-0.97 similarity and it sits at 0.88.
+         The existing detector z-scores against the whole document, so a
+         dip that is glaring inside one segment can sit on the document
+         median and score nothing. segment_cohesion_break measures each
+         segment against its OWN baseline instead, needs no vocabulary or
+         page-count rule, and feeds the confidence reason. Position
+         mattered far more than depth in validation: a dip on the last
+         page meant a foreign page 9 times out of 9, a dip mid-segment
+         only 3 times in 14.
+
+  FIX 25b Act on a trailing cohesion break (changes boundaries)
+         FIX 25 only reported. This turns a break on a segment's LAST
+         page into a real boundary, cutting the foreign page off into
+         its own segment. Scoped strictly to the last page for the
+         reason above: simulated over the labelled segments, splitting
+         on last-page breaks fixed 6 segments and broke 0, while enabling
+         mid-segment splits at any threshold immediately broke a correct
+         one. So mid-segment breaks stay advisory (confidence only).
+         This is the first change since FIX 24 that moves boundaries, so
+         the earlier "reporting only" guarantee no longer holds and the
+         232-segment baseline must be re-established on the next full run.
+         Validated on two labelled PDFs: 8 splits, 0 correct segments
+         lost. Two of the eight are merge splits with no ground truth for
+         the true cut point, so they are counted as unverified, not wins.
+
 Install:
     pip install google-genai google-auth requests pymupdf numpy
 
@@ -1253,6 +1284,55 @@ def score_all(det_features, img_flags, txt_flags):
 # 7. SEGMENTATION
 # ═══════════════════════════════════════════════════════════════════
 
+# FIX 25: segment cohesion. A correctly-cut document has fairly even
+# page-to-page similarity; one carrying a foreign page has a dip where
+# the content actually changes. The existing embedding detector cannot
+# see this because it z-scores against the whole PDF, so a dip that is
+# glaring inside one segment can sit right on the document-wide median
+# and score nothing. Measuring each segment against its OWN baseline is
+# what makes it visible, and it needs no vocabulary or page-count rule,
+# so it behaves the same on any template or language.
+#
+# Position turned out to matter far more than depth. Across the labelled
+# segments, when the deepest dip landed on the segment's LAST page it
+# contained a foreign page 9 times out of 9; a dip on the first interior
+# page meant that only 1 time in 10. That asymmetry makes sense: the
+# usual failure is the next document's opening page being swallowed by
+# the previous segment, which puts the content change at the very end.
+# Small sample, so the edge rule is kept conservative and the deep-dip
+# rule needs a much larger drop to fire on its own.
+COHESION_MIN_INTERIOR = 3      # pages needed before a baseline means anything
+COHESION_EDGE_DROP    = 0.04   # dip on the last page, relative to segment median
+COHESION_DEEP_DROP    = 0.10   # dip anywhere else
+
+
+def segment_cohesion_break(seg, scored_by_page):
+    """Find the page inside a segment where content most changes.
+
+    Returns (page, relative_drop, where) or None. Compares each segment
+    against its own similarity baseline, not the document's.
+    """
+    interior = range(seg["start"] + 1, seg["end"] + 1)
+    pages, sims = [], []
+    for p in interior:
+        v = (scored_by_page.get(p) or {}).get("image_similarity")
+        if v is not None:
+            pages.append(p); sims.append(v)
+    if len(sims) < COHESION_MIN_INTERIOR:
+        return None
+    base = statistics.median(sims)
+    if base <= 0:
+        return None
+    lo = min(sims)
+    drop = (base - lo) / base
+    page = pages[sims.index(lo)]
+    if page == seg["end"] and drop >= COHESION_EDGE_DROP:
+        return (page, drop, "last page")
+    if drop >= COHESION_DEEP_DROP:
+        return (page, drop, "mid-segment")
+    return None
+
+
 def build_segments(det_features, scored):
     boundary_set = {r["page_num"] for r in scored if r["is_boundary"]}
     boundary_set.add(1)
@@ -1261,7 +1341,42 @@ def build_segments(det_features, scored):
     for i, s in enumerate(starts):
         e = starts[i+1]-1 if i+1 < len(starts) else total
         segs.append({"start": s, "end": e})
-    return segs
+    return split_trailing_cohesion_breaks(segs, scored)
+
+
+def split_trailing_cohesion_breaks(segments, scored):
+    """FIX 25b: cut off a trailing page whose content clearly departs from
+    the rest of its segment.
+
+    The commonest miss in this pipeline is the next document's opening
+    page being swallowed by the previous segment. It has no format change
+    (the cover shares the previous page's orientation), no bookmark, and
+    an embedding drop too small to register against the whole PDF, so no
+    existing signal fires. But inside its own segment it stands out: the
+    other pages sit at 0.94-0.97 similarity and it sits at 0.88.
+
+    Only a break on the segment's LAST page is acted on. Position carried
+    almost all the signal in validation: a dip on the last page meant a
+    foreign page 9 times out of 9, a dip mid-segment only 3 times in 14.
+    Simulated over the labelled segments, splitting on last-page breaks
+    fixed 6 segments and broke 0; enabling mid-segment splits at any
+    threshold immediately broke a correct one. So mid-segment breaks stay
+    advisory and surface through the confidence reason instead.
+    """
+    scored_by_page = {r["page_num"]: r for r in scored}
+    out = []
+    for seg in segments:
+        brk = segment_cohesion_break(seg, scored_by_page)
+        if brk and brk[2] == "last page" and brk[0] > seg["start"]:
+            page, drop, _ = brk
+            row = scored_by_page.get(page)
+            if row is not None:
+                row["cohesion_split"] = round(drop, 4)
+            out.append({"start": seg["start"], "end": page - 1})
+            out.append({"start": page,          "end": seg["end"]})
+            continue
+        out.append(seg)
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1330,6 +1445,9 @@ def describe_boundary(det_row, scored_row):
                     else "drawing_density_spike")
     if scored_row.get("letterhead_score", 0) > 0:
         sigs.append("letterhead_change")
+    if scored_row.get("cohesion_split"):
+        sigs.append(f"cohesion_split({scored_row['cohesion_split']:.0%} "
+                    f"below segment baseline)")
     return ";".join(sigs) if sigs else "unscored_boundary"
 
 
@@ -1348,6 +1466,23 @@ def describe_boundary(det_row, scored_row):
 #
 # Thresholds come from WEIGHTS, not from fitting the sheet: 1.0 is one
 # trusted signal, so 1.8 means two independent signals agreed.
+#
+# MEDIUM sits just above the boundary threshold, so a boundary that only
+# just cleared 1.0 falls to LOW. That is deliberate and it is the knob
+# most worth understanding before changing.
+#
+# At 1.2, LOW covers ~81% of segments and every mis-segmented row lands
+# in it. At 1.0 it covers ~40% but a fifth of the errors escape into
+# MEDIUM. There is no useful setting in between: most boundaries score
+# exactly 1.0, so the evidence is bimodal and the split jumps straight
+# from 40% to 81%. Narrowing LOW further needs better signals, not a
+# different number here.
+#
+# 1.2 is the safer default because the two mistakes do not cost the same.
+# A segment wrongly marked LOW gets looked at and cleared. A broken
+# segment marked MEDIUM is never looked at again. Lower this only if
+# reviewing that many rows is genuinely more expensive than shipping the
+# occasional bad segment.
 CONF_HIGH_MARGIN   = 1.8
 CONF_MEDIUM_MARGIN = 1.2
 
@@ -1430,6 +1565,12 @@ def segmentation_confidence(seg, scored_by_page, total_pages,
                      f"(scored {scored_by_page[top]['total_score']:.2f}"
                      f"/{BOUNDARY_THRESHOLD})")
 
+    cohesion = segment_cohesion_break(seg, scored_by_page)
+    if cohesion:
+        c_page, c_drop, c_where = cohesion
+        risks.append(f"content_break@p{c_page}({c_drop*100:.0f}% below segment "
+                     f"baseline, {c_where})")
+
     if det_by_page:
         unreadable = [p for p in interior
                       if (d := det_by_page.get(p)) and not d.get("is_blank")
@@ -1466,21 +1607,6 @@ def segmentation_confidence(seg, scored_by_page, total_pages,
         reason = f"weak boundary evidence at p{weak_page} ({margin:.2f})"
 
     return tier, round(margin, 2), reason
-
-
-CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-CONF_NAME = {0: "LOW", 1: "MEDIUM", 2: "HIGH"}
-
-
-def combined_confidence(seg_tier, cls_tier):
-    """A row is only as good as its weaker half.
-
-    A segment with a perfect type label but boundaries that merged two
-    documents is not a HIGH result. Both halves stay in the output
-    separately so you can see which one is weak.
-    """
-    return CONF_NAME[min(CONF_RANK.get(seg_tier, 0),
-                          CONF_RANK.get(cls_tier, 0))]
 
 
 def write_report(out_dir, run_meta, det_features, scored, segments,
@@ -1558,11 +1684,16 @@ def write_report(out_dir, run_meta, det_features, scored, segments,
          "document_type_label":c.get("label", c.get("category", "Unknown")),
          "document_category":  c.get("category", "Supporting / Misc"),
          "classification_method": c.get("method", ""),
-         "confidence": combined_confidence(seg_tier, cls_tier),
-         "segmentation_confidence": seg_tier,
+         # `confidence` IS the segmentation confidence. It used to be
+         # min(segmentation, classification), but classification
+         # confidence is not calibrated yet, and letting it drag the
+         # headline down was demoting correctly-segmented rows for
+         # reasons that had nothing to do with their boundaries. It
+         # stays in its own column as information, not as a veto.
+         "confidence": seg_tier,
          "classification_confidence": cls_tier,
          "boundary_margin": seg_margin,
-         "confidence_basis": seg_why,
+         "confidence_reason": seg_why,
          "boundary_signals_fired": describe_boundary(
              det_by_page.get(s["start"]), scored_by_page.get(s["start"])),
          "special_tags": c.get("special_tags", []),
@@ -1585,15 +1716,16 @@ def write_report(out_dir, run_meta, det_features, scored, segments,
         w.writerow(["pdf_id","pdf_filename","total_pages",
                     "seg","start_page","end_page","page_count",
                     "document_type_id","document_type_label","document_category",
-                    "confidence","segmentation_confidence","classification_confidence",
-                    "boundary_margin","classification_method","boundary_signals_fired",
+                    "confidence","confidence_reason","boundary_margin",
+                    "classification_confidence","classification_method",
+                    "boundary_signals_fired",
                     "special_tags","ingest_mode","output_file"])
         for r in segs_out:
             w.writerow([r["pdf_id"],r["pdf_filename"],r["total_pages"],
                         r["segment_index"],r["start_page"],r["end_page"],r["page_count"],
                         r["document_type_id"],r["document_type_label"],r["document_category"],
-                        r["confidence"],r["segmentation_confidence"],
-                        r["classification_confidence"],r["boundary_margin"],
+                        r["confidence"],r["confidence_reason"],
+                        r["boundary_margin"],r["classification_confidence"],
                         r["classification_method"],r["boundary_signals_fired"],
                         "|".join(r.get("special_tags",[])),
                         r.get("ingest_mode","standard"),r["output_file"]])
